@@ -1,0 +1,43 @@
+---
+- name: Deploy GitLab on Secureloop Infrastructure
+  hosts: gitlab_servers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    #- name: Wait for cloud-init to complete
+    #  command: cloud-init status --wait
+    #  changed_when: false
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure required packages are installed
+      apt:
+        name:
+          - python3-docker
+          - python3-requests
+        state: present
+
+  roles:
+    - role: gitlab
+
+  post_tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "GitLab deployment complete!"
+          - "============================================"
+          - "URL: {{ gitlab_external_url }}"
+          - "SSH Port: {{ gitlab_ssh_port }}"
+          - ""
+          - "Next steps:"
+          - "1. Wait 2-5 minutes for GitLab to fully start"
+          - "2. Get initial root password:"
+          - "   ssh tonit@{{ inventory_hostname }} 'sudo docker exec -it gitlab grep Password /etc/gitlab/initial_root_password'"
+          - "3. Access GitLab and change the root password"
+          - "4. Configure DNS: Point {{ gitlab_hostname }} to {{ inventory_hostname }}"
+          - "============================================"

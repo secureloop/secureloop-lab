@@ -1,0 +1,25 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:{{ gitlab_version }}
+    container_name: gitlab
+    restart: always
+    hostname: '{{ gitlab_hostname }}'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url '{{ gitlab_external_url }}'
+        gitlab_rails['gitlab_shell_ssh_port'] = {{ gitlab_ssh_port }}
+{% if gitlab_enable_letsencrypt %}
+        letsencrypt['enable'] = true
+        letsencrypt['contact_emails'] = ['{{ gitlab_letsencrypt_email }}']
+{% else %}
+        letsencrypt['enable'] = false
+{% endif %}
+    ports:
+      - '{{ gitlab_http_port }}:80'
+      - '{{ gitlab_https_port }}:443'
+      - '{{ gitlab_ssh_port }}:22'
+    volumes:
+      - '{{ gitlab_config_dir }}:/etc/gitlab'
+      - '{{ gitlab_logs_dir }}:/var/log/gitlab'
+      - '{{ gitlab_data_dir }}:/var/opt/gitlab'
+    shm_size: '256m'

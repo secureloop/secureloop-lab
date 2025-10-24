@@ -11,7 +11,7 @@ services:
     ports:
       - '80:80'
       - '443:443'
-      - '22:22'
+      - '2222:22'  # GitLab SSH on port 2222 to avoid conflict with server SSH
     volumes:
       - '$GITLAB_HOME/config:/etc/gitlab'
       - '$GITLAB_HOME/logs:/var/log/gitlab'

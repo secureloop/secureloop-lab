@@ -1,0 +1,9 @@
+---
+# GitLab Handlers
+
+- name: Restart GitLab
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_home }}"
+    state: restarted
+  environment:
+    GITLAB_HOME: "{{ gitlab_home }}"

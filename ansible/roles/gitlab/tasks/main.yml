@@ -1,0 +1,64 @@
+---
+# GitLab Deployment Tasks
+
+- name: Ensure GitLab directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: tonit
+    group: tonit
+    mode: '0755'
+  loop:
+    - "{{ gitlab_home }}"
+    - "{{ gitlab_config_dir }}"
+    - "{{ gitlab_logs_dir }}"
+    - "{{ gitlab_data_dir }}"
+
+- name: Deploy GitLab docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ compose_file_path }}"
+    owner: tonit
+    group: tonit
+    mode: '0644'
+  notify: Restart GitLab
+
+- name: Check if GitLab container is running
+  command: docker ps -q -f name=gitlab
+  register: gitlab_container
+  changed_when: false
+  failed_when: false
+
+- name: Start GitLab with docker-compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_home }}"
+    state: present
+  environment:
+    GITLAB_HOME: "{{ gitlab_home }}"
+  when: gitlab_container.stdout == ""
+
+- name: Ensure GitLab is running
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_home }}"
+    state: present
+  environment:
+    GITLAB_HOME: "{{ gitlab_home }}"
+
+- name: Wait for GitLab to be ready
+  uri:
+    url: "http://localhost:{{ gitlab_http_port }}/-/health"
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 10
+  ignore_errors: true
+
+- name: Display GitLab access information
+  debug:
+    msg:
+      - "GitLab is starting up. This may take 2-5 minutes."
+      - "Access GitLab at: {{ gitlab_external_url }}"
+      - "GitLab SSH port: {{ gitlab_ssh_port }}"
+      - "To get the initial root password, run:"
+      - "  sudo docker exec -it gitlab grep 'Password:' /etc/gitlab/initial_root_password"

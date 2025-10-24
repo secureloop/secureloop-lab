@@ -16,6 +16,7 @@ resource "hcloud_ssh_key" "tonit" {
   public_key = file(var.ssh_public_key_path)
 
   labels = {
+    project    = "secureloop"
     managed_by = "terraform"
   }
 }
@@ -33,6 +34,7 @@ resource "hcloud_server" "debian_vm" {
   })
 
   labels = {
+    project    = "secureloop"
     managed_by = "terraform"
   }
 }
