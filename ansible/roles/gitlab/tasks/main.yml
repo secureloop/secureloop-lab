@@ -14,6 +14,15 @@
     - "{{ gitlab_logs_dir }}"
     - "{{ gitlab_data_dir }}"
 
+- name: Create health check access token file
+  copy:
+    content: "{{ gitlab_health_check_token }}"
+    dest: "{{ gitlab_data_dir }}/gitlab-rails/etc/gitlab_health_check_access_token"
+    owner: root
+    group: root
+    mode: '0600'
+  ignore_errors: true
+
 - name: Deploy GitLab docker-compose.yml
   template:
     src: docker-compose.yml.j2
@@ -44,10 +53,19 @@
   environment:
     GITLAB_HOME: "{{ gitlab_home }}"
 
-- name: Wait for GitLab to be ready
+- name: Wait for GitLab to respond on port {{ gitlab_http_port }}
+  wait_for:
+    port: "{{ gitlab_http_port }}"
+    host: localhost
+    timeout: 300
+    delay: 10
+  ignore_errors: true
+
+- name: Wait for GitLab to be ready (using health check API)
   uri:
-    url: "http://localhost:{{ gitlab_http_port }}/-/health"
+    url: "http://localhost:{{ gitlab_http_port }}/-/readiness?token={{ gitlab_health_check_token }}"
     status_code: 200
+    validate_certs: false
   register: result
   until: result.status == 200
   retries: 30

@@ -1,6 +1,6 @@
 services:
   gitlab:
-    image: gitlab/gitlab-ce:{{ gitlab_version }}
+    image: gitlab/gitlab-ee:{{ gitlab_version }}
     container_name: gitlab
     restart: always
     hostname: '{{ gitlab_hostname }}'
@@ -8,6 +8,7 @@ services:
       GITLAB_OMNIBUS_CONFIG: |
         external_url '{{ gitlab_external_url }}'
         gitlab_rails['gitlab_shell_ssh_port'] = {{ gitlab_ssh_port }}
+        gitlab_rails['monitoring_whitelist'] = ['127.0.0.1/32', '::1/128']
 {% if gitlab_enable_letsencrypt %}
         letsencrypt['enable'] = true
         letsencrypt['contact_emails'] = ['{{ gitlab_letsencrypt_email }}']
