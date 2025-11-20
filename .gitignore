@@ -19,3 +19,9 @@ override.tf.json
 # CLI configuration files
 .terraformrc
 terraform.rc
+
+ # Ansible files
+ansible/inventory/hosts.ini
+ansible/group_vars/all.yml
+!ansible/group_vars/all.yml.example
+*.retry
