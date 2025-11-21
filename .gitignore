@@ -33,3 +33,7 @@ ansible/group_vars/vault.yml
 
 /srv/
 .idea/
+.DS_Store
+.vscode/
+*.log
+.env
