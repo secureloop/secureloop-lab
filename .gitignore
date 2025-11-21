@@ -21,17 +21,16 @@ override.tf.json
 terraform.rc
 
  # Ansible files
-ansible/inventory/hosts.ini
-ansible/group_vars/all.yml
-ansible/group_vars/provisioning.yml
-ansible/group_vars/vault.yml
+infrastructure/ansible/inventory/hosts.ini
+infrastructure/ansible/group_vars/all.yml
+infrastructure/ansible/group_vars/provisioning.yml
+infrastructure/ansible/group_vars/vault.yml
 !ansible/group_vars/*.example
 *.retry
 .vault_pass
-.vault_pass.sh
 
 
-/srv/
+/infrastructure/srv/
 .idea/
 .DS_Store
 .vscode/
