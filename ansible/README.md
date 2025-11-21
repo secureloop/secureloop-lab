@@ -1,6 +1,11 @@
 # Ansible GitLab Deployment for Secureloop
 
-This Ansible playbook deploys GitLab CE on a Hetzner Cloud VM provisioned by Terraform.
+This Ansible playbook deploys GitLab on a Hetzner Cloud VM provisioned by Terraform.
+
+## Playbooks
+
+- **`playbook.yml`** - Deploy and configure GitLab server
+- **`provision-gitlab.yml`** - Provision users and import projects ([detailed guide](PROVISIONING.md))
 
 ## Architecture
 
@@ -38,7 +43,18 @@ export SERVER_IP=$(cd .. && terraform output -raw server_ip)
 echo $SERVER_IP
 ```
 
-### 2. Create inventory file
+### 2. Configure variables
+
+```bash
+# Copy the example configuration
+cp group_vars/all.yml.example group_vars/all.yml
+
+# Edit group_vars/all.yml and update:
+# - gitlab_letsencrypt_email (your email)
+# - Any other settings you want to customize
+```
+
+### 3. Create inventory file
 
 ```bash
 cp inventory/hosts.ini.example inventory/hosts.ini
@@ -52,7 +68,7 @@ cd ansible
 ansible-playbook -i "${SERVER_IP}," playbook.yml
 ```
 
-### 3. Run the playbook
+### 4. Run the playbook
 
 ```bash
 # Using inventory file
@@ -67,12 +83,17 @@ cd .. && terraform output -raw ansible_deploy_command | sh
 Edit `group_vars/all.yml` to customize:
 
 ```yaml
-gitlab_version: "18.3.5-ce.0"          # GitLab version
-gitlab_hostname: "gitlab.secureloop.de"  # Your domain
-gitlab_ssh_port: 2222                   # GitLab SSH port (not 22!)
-gitlab_enable_letsencrypt: false        # Enable for automatic SSL
-gitlab_letsencrypt_email: "your@email"  # Required if letsencrypt enabled
+gitlab_version: "18.5.2-ee.0"             # GitLab version
+gitlab_hostname: "gitlab.secureloop.de"   # Your domain
+gitlab_ssh_port: 2222                     # GitLab SSH port (not 22!)
+gitlab_enable_letsencrypt: true           # Enable for automatic SSL
+gitlab_letsencrypt_email: "your@email"    # Required if letsencrypt enabled
 ```
+
+**Important:**
+- Health check endpoints use IP whitelisting (localhost is automatically allowed)
+- Never commit the actual `group_vars/all.yml` with real secrets to git
+- Use the `.example` file as a template
 
 ## Post-Deployment
 
@@ -191,16 +212,45 @@ dig gitlab.secureloop.de
 nslookup gitlab.secureloop.de
 ```
 
+## GitLab Provisioning (Users & Projects)
+
+After deploying GitLab, you can automate user onboarding and project imports.
+
+### Quick Start
+
+```bash
+# 1. Create provisioning config
+cp group_vars/provisioning.yml.example group_vars/provisioning.yml
+
+# 2. Get GitLab API token
+ssh tonit@${SERVER_IP} 'sudo docker exec gitlab cat /etc/gitlab/initial_root_password'
+# Login to GitLab and create an API token: User Settings -> Access Tokens
+
+# 3. Edit provisioning.yml with your API token, users, and projects
+
+# 4. Run provisioning
+ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
+```
+
+**See [PROVISIONING.md](PROVISIONING.md) for detailed documentation**, including:
+- Creating users
+- Importing projects from GitHub/GitLab/Bitbucket
+- Authentication for private repositories
+- Troubleshooting guide
+
 ## Project Structure
 
 ```
 ansible/
 ├── ansible.cfg                          # Ansible configuration
-├── playbook.yml                         # Main playbook
+├── playbook.yml                         # Main deployment playbook
+├── provision-gitlab.yml                 # User/project provisioning
+├── PROVISIONING.md                      # Provisioning documentation
 ├── inventory/
 │   └── hosts.ini.example               # Inventory template
 ├── group_vars/
-│   └── all.yml                         # Variables
+│   ├── all.yml                         # Deployment variables
+│   └── provisioning.yml                # Provisioning variables
 └── roles/
     └── gitlab/
         ├── tasks/main.yml              # Deployment tasks

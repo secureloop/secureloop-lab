@@ -1,0 +1,103 @@
+---
+- name: Provision GitLab Users and Projects
+  hosts: gitlab_servers
+  gather_facts: false
+  vars_files:
+    - group_vars/vault.yml
+    - group_vars/provisioning.yml
+
+  pre_tasks:
+    - name: Verify GitLab is accessible
+      uri:
+        url: "{{ gitlab_external_url }}/api/v4/version"
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+        validate_certs: false
+        status_code: 200
+      register: gitlab_version
+      retries: 3
+      delay: 5
+
+    - name: Display GitLab version
+      debug:
+        msg: "GitLab version: {{ gitlab_version.json.version }}"
+
+  tasks:
+    - name: Create GitLab users
+      uri:
+        url: "{{ gitlab_external_url }}/api/v4/users"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+        body_format: json
+        body:
+          email: "{{ item.email }}"
+          username: "{{ item.username }}"
+          name: "{{ item.name }}"
+          password: "{{ item.password }}"
+          skip_confirmation: true
+          admin: "{{ item.admin | default(false) }}"
+        validate_certs: false
+        status_code: [201, 409]  # 201 = created, 409 = already exists
+      loop: "{{ gitlab_users }}"
+      register: user_creation
+      when: gitlab_users is defined
+
+    - name: Display user creation results
+      debug:
+        msg: "User {{ item.item.username }}: {{ 'Created' if item.status == 201 else 'Already exists' }}"
+      loop: "{{ user_creation.results }}"
+      when: gitlab_users is defined
+
+    - name: Create GitLab projects
+      uri:
+        url: "{{ gitlab_external_url }}/api/v4/projects"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          description: "{{ item.description | default('') }}"
+          visibility: "{{ item.visibility | default('private') }}"
+          initialize_with_readme: "{{ item.initialize_with_readme | default(false) }}"
+        validate_certs: false
+        status_code: [201, 400]  # 201 = created, 400 = already exists
+      loop: "{{ gitlab_projects }}"
+      register: project_creation
+      when: gitlab_projects is defined and item.import_url is not defined
+
+    - name: Import GitLab projects from external repositories
+      uri:
+        url: "{{ gitlab_external_url }}/api/v4/projects"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          import_url: "{{ item.import_url }}"
+          description: "{{ item.description | default('') }}"
+          visibility: "{{ item.visibility | default('private') }}"
+        validate_certs: false
+        status_code: [201, 400]
+      loop: "{{ gitlab_projects }}"
+      register: project_import
+      when: gitlab_projects is defined and item.import_url is defined
+
+    - name: Display project creation results
+      debug:
+        msg: "Project {{ item.item.name }}: {{ 'Created/Imported' if item.status == 201 else 'Already exists or failed' }}"
+      loop: "{{ project_creation.results | default([]) + project_import.results | default([]) }}"
+      when: gitlab_projects is defined
+
+  post_tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "GitLab provisioning complete!"
+          - "============================================"
+          - "Users created/verified: {{ gitlab_users | length if gitlab_users is defined else 0 }}"
+          - "Projects created/imported: {{ gitlab_projects | length if gitlab_projects is defined else 0 }}"
+          - "============================================"
