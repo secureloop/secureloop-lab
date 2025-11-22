@@ -29,6 +29,7 @@ infrastructure/ansible/group_vars/vault.yml
 *.retry
 .vault_pass
 
+/srv/
 
 /infrastructure/srv/
 .idea/
