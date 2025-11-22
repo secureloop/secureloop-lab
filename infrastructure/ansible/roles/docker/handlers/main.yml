@@ -1,0 +1,7 @@
+---
+# Docker Handlers
+
+- name: Restart Docker
+  systemd:
+    name: docker
+    state: restarted
