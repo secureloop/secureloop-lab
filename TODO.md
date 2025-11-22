@@ -4,15 +4,23 @@
 - [x] Initial Ansible Provisioner
 - [x] Initial Terraform Provisioner
 - [ ] R&D Local
-  - [ ] Trivy https://trivy.dev/docs/latest/advanced/self-hosting/ 
+  - [x] Trivy https://trivy.dev/docs/latest/advanced/self-hosting/ 
 - [ ] Initial Demo applications
-  - [ ] Java
+  - [x] Java
   - [ ] Golang
   - [ ] Node.js
   - [ ] Python
 - [ ] CI/CD pipelines for applications
-  - [ ] Java
+  - [x] Java
   - [ ] Golang
   - [ ] Node.js
   - [ ] Python
+- Policy Enforcement
+  - [ ] Security Scanning with Trivy
+    - [x] Java
+    - [ ] Golang
+    - [ ] Node.js
+    - [ ] Python
+  - [ ] Policy Enforcement with Conftest https://www.conftest.dev/
+  - [ ] Policy Enforcement with OPA https://www.openpolicyagent.org/
 - [ ] Documentation
