@@ -1,0 +1,61 @@
+---
+# Lab Deployment Tasks
+
+- name: Ensure Lab directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: tonit
+    group: tonit
+    mode: '0755'
+  loop:
+    - "{{ lab_home }}"
+
+- name: "Template configuration files to {{ lab_home }}"
+  ansible.builtin.template:
+    src: "roles/lab-supply-chain/templates/{{ item.filename }}.j2"
+    dest: "{{ item.dest_dir }}/{{ item.filename }}"
+    owner: "tonit"
+    group: "tonit"
+    mode: '0644'
+  notify: Restart Lab
+  loop:
+    - { filename: "docker-compose.yml", dest_dir: "{{ lab_home }}" }
+    - { filename: "Caddyfile", dest_dir: "{{ lab_home }}" }
+  tags:
+    - config
+
+- name: Check if trivy container is running
+  command: docker ps -q -f name=trivy
+  register: trivy_container
+  changed_when: false
+  failed_when: false
+
+- name: Start lab with docker-compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ lab_home }}"
+    state: present
+  environment:
+    LAB_HOME: "{{ lab_home }}"
+  when: trivy_container.stdout == ""
+
+- name: Ensure lab is running
+  community.docker.docker_compose_v2:
+    project_src: "{{ lab_home }}"
+    state: present
+  environment:
+    LAB_HOME: "{{ lab_home }}"
+
+- name: Wait for lab container to be running
+  command: docker ps -q -f name=trivy -f status=running
+  register: trivy_running
+  until: lab_running.stdout != ""
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Display lab access information
+  debug:
+    msg:
+      - "Lab is starting up."
+      - "Access Trivy at: {{ trivy_external_url }}"

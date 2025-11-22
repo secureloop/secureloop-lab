@@ -1,0 +1,6 @@
+- name: Restart Lab
+  community.docker.docker_compose_v2:
+    project_src: "{{ lab_home }}"
+    state: restarted
+  environment:
+    LAB_HOME: "{{ lab_home }}"

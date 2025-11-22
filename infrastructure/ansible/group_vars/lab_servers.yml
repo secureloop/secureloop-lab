@@ -1,0 +1,9 @@
+trivy_external_url: "https://trivy.secureloop.de"
+
+# lab Storage
+lab_home: "/opt/secureloop"
+
+# Docker Compose
+compose_project_name: "secureloop"
+compose_file_path: "{{ lab_home }}/docker-compose.yml"
+

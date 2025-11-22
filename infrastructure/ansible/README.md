@@ -47,9 +47,9 @@ echo $SERVER_IP
 
 ```bash
 # Copy the example configuration
-cp group_vars/all.yml.example group_vars/all.yml
+cp group_vars/gitlab_servers.yml.example group_vars/gitlab_servers.yml
 
-# Edit group_vars/all.yml and update:
+# Edit group_vars/gitlab_servers.yml and update:
 # - gitlab_letsencrypt_email (your email)
 # - Any other settings you want to customize
 ```
@@ -65,14 +65,14 @@ Or use the dynamic method:
 ```bash
 # Deploy directly without inventory file
 cd ansible
-ansible-playbook -i "${SERVER_IP}," playbook.yml
+ansible-playbook -i "${SERVER_IP}," install-gitlab_servers.yml
 ```
 
 ### 4. Run the playbook
 
 ```bash
 # Using inventory file
-ansible-playbook playbook.yml
+ansible-playbook install-gitlab_servers.yml
 
 # Or using Terraform output command directly
 cd .. && terraform output -raw ansible_deploy_command | sh
@@ -147,7 +147,7 @@ gitlab_letsencrypt_email: "admin@secureloop.de"
 
 Then re-run the playbook:
 ```bash
-ansible-playbook playbook.yml
+ansible-playbook install-gitlab_servers.yml
 ```
 
 ### Option 2: Manual Certificates
@@ -229,7 +229,7 @@ ssh tonit@${SERVER_IP} 'sudo docker exec gitlab cat /etc/gitlab/initial_root_pas
 # 3. Edit provisioning.yml with your API token, users, and projects
 
 # 4. Run provisioning
-ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
+ansible-playbook -i inventory/hosts.ini provision-gitlab_servers.yml
 ```
 
 **See [PROVISIONING.md](PROVISIONING.md) for detailed documentation**, including:

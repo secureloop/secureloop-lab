@@ -91,7 +91,7 @@ ansible-vault rekey group_vars/vault.yml
 ### Option 1: Interactive password prompt
 
 ```bash
-ansible-playbook -i '188.245.182.211,' provision-gitlab.yml --ask-vault-pass
+ansible-playbook -i '188.245.182.211,' provision-gitlab_servers.yml --ask-vault-pass
 ```
 
 You'll be prompted for the vault password each time.
@@ -112,7 +112,7 @@ vault_password_file = ./.vault_pass
 
 Then run without `--ask-vault-pass`:
 ```bash
-ansible-playbook -i '188.245.182.211,' provision-gitlab.yml
+ansible-playbook -i '188.245.182.211,' provision-gitlab_servers.yml
 ```
 
 **Note:** `.vault_pass` is in `.gitignore` to prevent committing it.
@@ -121,7 +121,7 @@ ansible-playbook -i '188.245.182.211,' provision-gitlab.yml
 
 ```bash
 export ANSIBLE_VAULT_PASSWORD_FILE=.vault_pass
-ansible-playbook -i '188.245.182.211,' provision-gitlab.yml
+ansible-playbook -i '188.245.182.211,' provision-gitlab_servers.yml
 ```
 
 ## How It Works
@@ -212,7 +212,7 @@ group_vars/
 
 Load different files per environment:
 ```yaml
-# provision-gitlab.yml
+# provision-gitlab_servers.yml
 vars_files:
   - "group_vars/vault_{{ env }}.yml"
   - group_vars/provisioning.yml
@@ -220,7 +220,7 @@ vars_files:
 
 Run with:
 ```bash
-ansible-playbook provision-gitlab.yml -e "env=production" --ask-vault-pass
+ansible-playbook provision-gitlab_servers.yml -e "env=production" --ask-vault-pass
 ```
 
 ## Troubleshooting
@@ -277,7 +277,7 @@ For automated deployments, store the vault password as a secret in your CI/CD sy
 provision:
   script:
     - echo "$ANSIBLE_VAULT_PASSWORD" > .vault_pass
-    - ansible-playbook provision-gitlab.yml
+    - ansible-playbook provision-gitlab_servers.yml
   variables:
     ANSIBLE_VAULT_PASSWORD: $VAULT_PASSWORD
 ```
@@ -301,10 +301,10 @@ ansible-vault edit group_vars/vault.yml
 ansible-vault rekey group_vars/vault.yml
 
 # Run playbook
-ansible-playbook provision-gitlab.yml --ask-vault-pass
+ansible-playbook provision-gitlab_servers.yml --ask-vault-pass
 
 # With password file
-ansible-playbook provision-gitlab.yml --vault-password-file .vault_pass
+ansible-playbook provision-gitlab_servers.yml --vault-password-file .vault_pass
 ```
 
 ## Additional Resources

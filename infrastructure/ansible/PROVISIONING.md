@@ -16,7 +16,7 @@ The `provision-gitlab.yml` playbook automates:
 1. **GitLab is deployed and running**
    ```bash
    # Deploy GitLab first if not already done
-   ansible-playbook playbook.yml
+   ansible-playbook install-gitlab_servers.yml
    ```
 
 2. **GitLab API access token**
@@ -144,14 +144,14 @@ Projects can have three visibility levels:
 
 ```bash
 cd ansible
-ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
+ansible-playbook -i inventory/hosts.ini provision-gitlab_servers.yml
 ```
 
 ### Using dynamic inventory
 
 ```bash
 export SERVER_IP=$(cd .. && terraform output -raw server_ip)
-ansible-playbook -i "${SERVER_IP}," provision-gitlab.yml
+ansible-playbook -i "${SERVER_IP}," provision-gitlab_servers.yml
 ```
 
 ### Dry Run (Check Mode)
@@ -361,7 +361,7 @@ Error: SSL verification failed
 ```bash
 # 1. Edit provisioning.yml with team members
 # 2. Run provisioning
-ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
+ansible-playbook -i inventory/hosts.ini provision-gitlab_servers.yml
 
 # 3. Notify users of their accounts
 # 4. Have them change passwords on first login
@@ -373,7 +373,7 @@ ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
 # 1. Create GitHub Personal Access Token
 # 2. Add all repositories to provisioning.yml
 # 3. Run import
-ansible-playbook -i inventory/hosts.ini provision-gitlab.yml
+ansible-playbook -i inventory/hosts.ini provision-gitlab_servers.yml
 
 # 4. Verify all projects imported successfully
 # 5. Update Git remotes in local repositories
