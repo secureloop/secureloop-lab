@@ -1,0 +1,23 @@
+#cloud-config
+hostname: lab-supply-chain
+
+users:
+  - name: tonit
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_import_id: []
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - git
+  - vim
+  - htop
+
+final_message: "Lab server ready for provisioning after $UPTIME seconds"
