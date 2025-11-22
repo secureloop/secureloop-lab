@@ -90,3 +90,103 @@ jobs:
           echo "📦 JAR artifact uploaded"
           echo "🐳 Docker image pushed to:"
           echo "${{ steps.meta.outputs.tags }}"
+
+  security:
+    name: Security Scanning
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Generate SBOM with CycloneDX
+        working-directory: demo-apps/java-spring
+        run: ./mvnw package cyclonedx:makeAggregateBom -DskipTests
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: demo-apps/java-spring/target/bom.json
+          retention-days: 90
+
+      - name: Submit dependencies to GitHub
+        uses: advanced-security/maven-dependency-submission-action@v4
+        with:
+          directory: demo-apps/java-spring
+
+      - name: Run Trivy vulnerability scanner (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'demo-apps/java-spring'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+
+      - name: Upload Trivy filesystem results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-filesystem'
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+
+      - name: Run Trivy vulnerability scanner (container)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+
+      - name: Upload Trivy container results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'trivy-container'
+
+      - name: Run Trivy blocking scan (CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Display security scan results
+        if: always()
+        run: |
+          echo "🔒 Security Scanning Complete!"
+          echo "📋 SBOM: Uploaded as artifact"
+          echo "🔍 Trivy Results: Available in Security tab"
+          echo "🚨 Build Gate: Blocks on CRITICAL/HIGH vulnerabilities"
