@@ -7,6 +7,7 @@ on:
       - develop
     paths:
       - 'demo-apps/java-spring/**'
+      - '.github/workflows/build-java.yml'
   workflow_dispatch:
 
 env:
