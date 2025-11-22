@@ -121,10 +121,10 @@ jobs:
           path: demo-apps/java-spring/target/bom.json
           retention-days: 90
 
-      - name: Submit dependencies to GitHub
-        uses: advanced-security/maven-dependency-submission-action@v4
-        with:
-          directory: demo-apps/java-spring
+      #- name: Submit dependencies to GitHub
+      #  uses: advanced-security/maven-dependency-submission-action@v4
+        #with:
+        #  directory: demo-apps/java-spring
 
       - name: Run Trivy vulnerability scanner (filesystem)
         uses: aquasecurity/trivy-action@master
