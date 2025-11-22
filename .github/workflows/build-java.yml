@@ -190,3 +190,85 @@ jobs:
           echo "📋 SBOM: Uploaded as artifact"
           echo "🔍 Trivy Results: Available in Security tab"
           echo "🚨 Build Gate: Blocks on CRITICAL/HIGH vulnerabilities"
+
+  policy:
+    name: Policy Validation
+    runs-on: ubuntu-22.04
+    needs: [build, security]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Conftest
+        run: |
+          CONFTEST_VERSION=0.49.1
+          wget "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf "conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          sudo mv conftest /usr/local/bin/
+          conftest --version
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: artifacts/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+
+      - name: Pull and inspect Docker image
+        run: |
+          docker pull ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          docker inspect ${{ fromJSON(steps.meta.outputs.json).tags[0] }} > artifacts/docker-metadata.json
+
+      - name: Validate SBOM Policy
+        continue-on-error: true
+        run: |
+          echo "📋 Validating SBOM policy..."
+          conftest test \
+            --policy policies/sbom/ \
+            --namespace sbom \
+            --fail-on-warn=false \
+            artifacts/bom.json || echo "SBOM policy warnings found"
+
+      - name: Validate Docker Image Policy
+        continue-on-error: true
+        run: |
+          echo "🐳 Validating Docker image policy..."
+          conftest test \
+            --policy policies/docker/ \
+            --namespace docker \
+            --fail-on-warn=false \
+            artifacts/docker-metadata.json || echo "Docker policy warnings found"
+
+      - name: Upload policy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-validation-results
+          path: artifacts/
+          retention-days: 30
+
+      - name: Display policy results
+        if: always()
+        run: |
+          echo "📜 Policy Validation Complete!"
+          echo "📋 SBOM Policy: Checked (warnings mode)"
+          echo "🐳 Docker Policy: Checked (warnings mode)"
+          echo "ℹ️  Policy violations are reported but do not fail the build"
+          echo "💡 Review artifacts for detailed policy results"
