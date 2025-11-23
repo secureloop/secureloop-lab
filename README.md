@@ -1,39 +1,26 @@
-# The 2026 Imperative: Why Software Supply Chain Security Now?
+# SECURELOOP Lab
 
-The landscape has shifted. 
+**Hands-on Implementation of the SECURELOOP Framework**  
+*Learn Supply Chain Security by doing – not by reading.*
 
-We are no longer fighting isolated hackers; we are navigating a hostile economic and regulatory environment. Here are the three market forces driving this urgency:
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Framework](https://img.shields.io/badge/framework-SECURELOOP-blue)](https://github.com/secureloop-framework/secureloop)
+[![Deployment](https://img.shields.io/badge/deployment-Hetzner%20Cloud-red)](https://www.hetzner.com/cloud)
 
-## 1. Attack economics flipped: Upstream is now the highest-leverage target
+---
 
-Security is an economic game, and attackers have realized that hacking a specific company is "expensive" and inefficient.
+## 🎯 What is SECURELOOP Lab?
 
-The Mechanism: 
-- Instead of spending months finding a zero-day vulnerability in your specific application, attackers target the "upstream" open-source libraries and tools that you (and thousands of others) rely on.
+A complete, production-ready demonstration of the [SECURELOOP Framework](https://github.com/secureloop-framework/secureloop) for Software Supply Chain Security.
 
-The Leverage: 
-- By compromising a single popular package on NPM or PyPI, or hacking a CI/CD tool, an attacker gains instant access to thousands of downstream corporate environments.
+**What you get:**
+- 4 demo applications (Java, Go, Node.js, Python) with intentional vulnerabilities
+- Automated SBOM generation with CycloneDX
+- Vulnerability scanning with Trivy
+- Artifact signing with Cosign (Sigstore)
+- Policy enforcement with OPA
+- Complete observability stack (Grafana + Prometheus)
+- Infrastructure-as-Code (Terraform, Ansible, Docker Compose)
 
-Why Now: 
-- In 2025, this is the dominant attack vector because it offers the highest Return on Investment (ROI) for cybercriminals. It is the "industrialization" of hacking—why break into one house when you can poison the water supply for the whole city?
-
-## 2. Regulation and buyers turned supply-chain hygiene into a market access requirement
-   
-Supply chain security has graduated from a "Best Practice" to a "License to Sell."
-
-The Mechanism: 
-- Governments (EU CRA, US EO 14028) and enterprise procurement teams have shifted liability. They no longer accept "we didn't know that library was bad." They demand proof of provenance (SBOMs) and attestation of build integrity (SLSA).
-
-The Consequence: 
-- This is a binary market gate. If you cannot demonstrate control over your software supply chain, you are legally barred from selling in the EU and disqualified from major enterprise RFPs.
-
-Why Now: 
-- The grace periods for these regulations have ended. Security is no longer just protecting data; it is protecting revenue streams.
-
-## 3. Hyper-composed, AI-accelerated stacks
-   
-The way we build software has fundamentally changed, creating an opacity problem that human review can no longer solve.
-
-The Mechanism: 
-- Modern applications are "hyper-composed"—meaning 90% of the code is assembled from external open-source dependencies, not written in-house. 
-- Simultaneously, AI coding assistants are accelerating the ingestion of these external packages, often suggesting libraries that don't exist (hallucinations) or are unvetted.
+**Deployment time:** ~30 minutes  
+**Cost:** ~€15.50/month (Hetzner CX41 server)
