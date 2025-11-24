@@ -1,6 +1,6 @@
 services:
     trivy:
-      image: aquasec/trivy:latest
+      image: aquasec/trivy:0.67.2
       container_name: trivy-server
       restart: unless-stopped
       ports:
@@ -12,7 +12,7 @@ services:
       command: "server --listen 0.0.0.0:8080"
 
    caddy:
-      image: caddy:latest
+      image: caddy:2.10.2
       container_name: lab-caddy
       restart: unless-stopped
       ports:
@@ -28,8 +28,6 @@ services:
         - trivy
 
 volumes:
-    postgres-data:
-    grafana-data:
     caddy-data:
     caddy-config:
 
