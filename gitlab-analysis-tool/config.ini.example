@@ -1,0 +1,11 @@
+[gitlab]
+# Base URL of the GitLab instance (no trailing /api/v4).
+url = https://gitlab.example.com
+
+# Personal access token. Required scopes:
+#   - read_api  (for groups + projects)
+#   - admin/sudo (optional; required to enumerate users via /users)
+token = glpat-REPLACE-ME
+
+# Set to false only for self-signed lab instances.
+verify_tls = true
