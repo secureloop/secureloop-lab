@@ -156,3 +156,11 @@ No automated tests in this first cut; the script's surface is small and entirely
   project features — much more scannable than the wide Markdown tables.
   No additional API calls or dependencies; rendering is driven from the
   same in-memory data as the Markdown path.
+- **2026-04-29** — Stable report path + HTTP server. Every default-output
+  run also writes `reports/latest.{md,html}` (a copy of the just-written
+  timestamped file) so external consumers have a fixed URL to point at.
+  Skipped when `--output` is supplied to avoid surprise writes. Added a
+  thin `serve.py` wrapper that runs the inventory and serves `reports/`
+  over HTTP via `http.server.ThreadingHTTPServer`; defaults to
+  `0.0.0.0:8765` because the tool is intended for use inside an isolated
+  lab network. `--no-run`, `--bind`, `--port`, `--config` flags supported.

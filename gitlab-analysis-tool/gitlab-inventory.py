@@ -9,6 +9,7 @@ import argparse
 import configparser
 import html as html_lib
 import json
+import shutil
 import ssl
 import sys
 import time
@@ -680,11 +681,23 @@ def main(argv: list[str]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    # Maintain a stable copy at reports/latest.<ext> for serving over HTTP.
+    # Only when output goes to the default reports/ directory; if the user
+    # passed --output we honour that path exactly and don't write anywhere else.
+    latest_paths: dict[str, Path] = {}
+    if args.output is None:
+        for fmt, path in paths.items():
+            latest = path.with_name(f"latest.{fmt}")
+            shutil.copyfile(path, latest)
+            latest_paths[fmt] = latest
+
     host = urlparse(url).hostname or url
     user_summary = "users skipped" if users is None else f"{len(users)} users"
     print(f"{host} ({version.get('version', 'unknown')}): {len(groups)} groups, {len(projects)} projects, {user_summary}")
     for fmt, path in paths.items():
         print(f"report ({fmt}): {path}")
+    for fmt, path in latest_paths.items():
+        print(f"latest ({fmt}): {path}")
     return 0
 
 

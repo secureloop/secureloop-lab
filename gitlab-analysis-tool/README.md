@@ -54,6 +54,34 @@ self-contained (inline CSS, no JS, no external resources) so you can open it
 straight from your file system. It uses sticky table headers and zebra rows
 so the wide projects/users tables stay readable when scrolling.
 
+For convenience, every default-output run also writes
+`reports/latest.md` and `reports/latest.html` — copies of the freshly
+created timestamped files. Useful if something always wants the same path.
+This only happens when `--output` is not supplied; with an explicit
+`--output` only the path you give is written.
+
+## Serving reports over HTTP
+
+`serve.py` runs the inventory and starts a tiny HTTP server on
+`reports/`, so you can open the latest report from a browser at a
+stable URL.
+
+```bash
+python3 serve.py                 # runs the inventory, then serves on 0.0.0.0:8765
+python3 serve.py --no-run        # skip the inventory; just serve what's already in reports/
+python3 serve.py --port 9000     # custom port
+python3 serve.py --bind 127.0.0.1 # localhost only
+python3 serve.py --config /path/to/config.ini
+```
+
+Open `http://<host>:8765/latest.html` (or `latest.md`).
+
+The server binds `0.0.0.0` by default because this tool is intended for
+use inside an isolated lab network. The reports include user data and
+admin metadata — do **not** expose the port on the public internet. If
+that ever becomes a concern, pass `--bind 127.0.0.1` or put it behind a
+real reverse proxy with auth.
+
 ## What it collects
 
 Calls only `GET` endpoints under `/api/v4`:
