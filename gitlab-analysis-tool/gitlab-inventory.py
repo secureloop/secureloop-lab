@@ -174,6 +174,44 @@ def classify_interaction(user: dict) -> str:
     return "active"
 
 
+# (short_name, access_level_field, legacy_boolean_field)
+# Newer GitLab fields use *_access_level with values disabled/private/enabled/public;
+# legacy fields are simple booleans. Prefer access_level when both exist.
+PROJECT_FEATURES: list[tuple[str, str | None, str | None]] = [
+    ("issues", "issues_access_level", "issues_enabled"),
+    ("mrs", "merge_requests_access_level", "merge_requests_enabled"),
+    ("ci", "builds_access_level", "jobs_enabled"),
+    ("wiki", "wiki_access_level", "wiki_enabled"),
+    ("snippets", "snippets_access_level", "snippets_enabled"),
+    ("registry", "container_registry_access_level", "container_registry_enabled"),
+    ("packages", None, "packages_enabled"),
+    ("pages", "pages_access_level", None),
+    ("lfs", None, "lfs_enabled"),
+    ("service_desk", None, "service_desk_enabled"),
+    ("releases", "releases_access_level", None),
+    ("environments", "environments_access_level", None),
+    ("feature_flags", "feature_flags_access_level", None),
+    ("security", "security_and_compliance_access_level", None),
+    ("analytics", "analytics_access_level", None),
+    ("forking", "forking_access_level", None),
+]
+
+
+def is_feature_enabled(project: dict, access_field: str | None, legacy_field: str | None) -> bool | None:
+    """Return True if enabled, False if disabled, None if the API didn't return either field."""
+    if access_field and access_field in project:
+        val = project.get(access_field)
+        return val is not None and val != "disabled"
+    if legacy_field and legacy_field in project:
+        return bool(project.get(legacy_field))
+    return None
+
+
+def enabled_features(project: dict) -> list[str]:
+    return [name for name, access_f, legacy_f in PROJECT_FEATURES
+            if is_feature_enabled(project, access_f, legacy_f)]
+
+
 def render_report(
     base_url: str,
     version: dict[str, str],
@@ -222,9 +260,10 @@ def render_report(
     if not projects:
         lines.append("_No projects visible to this token._")
     else:
-        lines.append("| full_path | visibility | archived | default_branch | last_activity_at | namespace_kind |")
-        lines.append("|---|---|---|---|---|---|")
-        for p in projects:
+        per_project_features = [enabled_features(p) for p in projects]
+        lines.append("| full_path | visibility | archived | default_branch | last_activity_at | namespace_kind | features |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for p, feats in zip(projects, per_project_features):
             ns = p.get("namespace") or {}
             lines.append(
                 f"| {md_escape(p.get('path_with_namespace'))} "
@@ -232,8 +271,30 @@ def render_report(
                 f"| {md_escape(p.get('archived'))} "
                 f"| {md_escape(p.get('default_branch'))} "
                 f"| {md_escape(p.get('last_activity_at'))} "
-                f"| {md_escape(ns.get('kind'))} |"
+                f"| {md_escape(ns.get('kind'))} "
+                f"| {md_escape(', '.join(feats))} |"
             )
+        lines.append("")
+        lines.append("### Feature enablement summary")
+        lines.append("")
+        lines.append(
+            "_For each feature, how many projects have it enabled. `n/a` means the API "
+            "response did not include that feature field for any project (e.g. feature "
+            "not available on this instance)._"
+        )
+        lines.append("")
+        total = len(projects)
+        lines.append("| feature | enabled in |")
+        lines.append("|---|---|")
+        for name, access_f, legacy_f in PROJECT_FEATURES:
+            states = [is_feature_enabled(p, access_f, legacy_f) for p in projects]
+            known = [s for s in states if s is not None]
+            if not known:
+                cell = "n/a"
+            else:
+                enabled_count = sum(1 for s in known if s)
+                cell = f"{enabled_count} / {len(known)}" + ("" if len(known) == total else f" (of {total})")
+            lines.append(f"| {name} | {cell} |")
     lines.append("")
 
     lines.append("## Users")
