@@ -11,7 +11,7 @@ import json
 import ssl
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -134,6 +134,46 @@ def md_escape(value: Any) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
 
 
+def parse_date(value: Any) -> date | None:
+    """Accept an ISO date or datetime string; return only the date component."""
+    if not value:
+        return None
+    s = str(value)
+    # Trim trailing 'Z' so fromisoformat works on stdlib < 3.11.
+    if s.endswith("Z"):
+        s = s[:-1]
+    try:
+        if "T" in s:
+            return datetime.fromisoformat(s).date()
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        return None
+
+
+def days_since(value: Any, today: date) -> int | None:
+    parsed = parse_date(value)
+    if parsed is None:
+        return None
+    return (today - parsed).days
+
+
+def classify_interaction(user: dict) -> str:
+    """Classify a user by which activity fields are populated.
+
+    last_activity_on is updated by UI, API, and git over HTTP/SSH.
+    last_sign_in_at is updated only by UI sign-ins.
+    """
+    activity = parse_date(user.get("last_activity_on"))
+    sign_in = parse_date(user.get("last_sign_in_at"))
+    if activity is None and sign_in is None:
+        return "never"
+    if activity is not None and sign_in is None:
+        return "non-ui-only"
+    if activity is None and sign_in is not None:
+        return "ui-only"
+    return "active"
+
+
 def render_report(
     base_url: str,
     version: dict[str, str],
@@ -203,15 +243,39 @@ def render_report(
     elif not users:
         lines.append("_No users returned._")
     else:
-        lines.append("| id | username | state | is_admin | last_sign_in_at |")
-        lines.append("|---|---|---|---|---|")
-        for u in users:
+        today = generated_at.date()
+        labels = [classify_interaction(u) for u in users]
+        counts = {
+            "never": labels.count("never"),
+            "non-ui-only": labels.count("non-ui-only"),
+            "ui-only": labels.count("ui-only"),
+            "active": labels.count("active"),
+        }
+        lines.append("### User activity summary")
+        lines.append("")
+        lines.append(f"- never interacted: **{counts['never']}**")
+        lines.append(f"- non-UI only (git/API): **{counts['non-ui-only']}**")
+        lines.append(f"- UI-only (no activity day): **{counts['ui-only']}**")
+        lines.append(f"- active (UI + activity): **{counts['active']}**")
+        lines.append("")
+        lines.append(
+            "_`last_activity_on` covers UI, API, and git over HTTP/SSH (date-only "
+            "granularity); `last_sign_in_at` is UI sign-ins only._"
+        )
+        lines.append("")
+        lines.append("| id | username | state | is_admin | last_sign_in_at | last_activity_on | days_since_activity | interaction |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for u, label in zip(users, labels):
+            d_activity = days_since(u.get("last_activity_on"), today)
             lines.append(
                 f"| {md_escape(u.get('id'))} "
                 f"| {md_escape(u.get('username'))} "
                 f"| {md_escape(u.get('state'))} "
                 f"| {md_escape(u.get('is_admin'))} "
-                f"| {md_escape(u.get('last_sign_in_at'))} |"
+                f"| {md_escape(u.get('last_sign_in_at'))} "
+                f"| {md_escape(u.get('last_activity_on'))} "
+                f"| {md_escape(d_activity)} "
+                f"| {md_escape(label)} |"
             )
     lines.append("")
 

@@ -49,7 +49,38 @@ Calls only `GET` endpoints under `/api/v4`:
 - `/version` — instance version
 - `/groups` — all groups visible to the token (paginated)
 - `/projects` — all projects visible to the token, including archived (paginated)
-- `/users` — all users (admin only; gracefully skipped on 403)
+- `/users` — all users (admin only; gracefully skipped on 403). Each user is
+  classified by activity (see below).
+
+## User activity columns
+
+For each user the report shows `last_sign_in_at`, `last_activity_on`,
+`days_since_activity`, and an `interaction` label.
+
+- `last_sign_in_at` — datetime of the last **UI** sign-in. Only UI logins
+  update this field.
+- `last_activity_on` — date (day-level granularity) of the last interaction
+  of any kind: UI, API, or **git over HTTP/SSH**. This is what tells you a
+  user has touched the instance even if they never logged into the web UI.
+- `days_since_activity` — `today − last_activity_on` in whole days, or empty
+  if the user has no recorded activity day.
+- `interaction` — derived label:
+  - `never` — both fields null; the account has not interacted at all.
+  - `non-ui-only` — has activity but never signed into the UI (typical for
+    git-only or API-only consumers, including bot/service accounts).
+  - `ui-only` — has a sign-in but no activity day (rare; treat as edge case).
+  - `active` — both fields populated.
+
+A short summary block above the table totals each label so you can scan the
+instance at a glance.
+
+Caveat: very old accounts predating GitLab's tracking of these fields may
+show `null` even if they once interacted. Not a concern for a fresh 17.x
+instance.
+
+The GitLab v4 API does not separately expose "last git operation" vs. "last
+API call" timestamps; `last_activity_on` is the only signal that aggregates
+non-UI activity, which is why it is the primary column.
 
 ## Configuration reference
 
