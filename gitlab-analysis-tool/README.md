@@ -27,20 +27,32 @@ Reachability check:
 python3 gitlab-inventory.py --dry-run
 ```
 
-Full inventory:
+Full inventory (writes both Markdown and HTML by default):
 
 ```bash
 python3 gitlab-inventory.py
 ```
 
+Pick a single format:
+
+```bash
+python3 gitlab-inventory.py --format html
+python3 gitlab-inventory.py --format md
+```
+
 Custom config or output path:
 
 ```bash
-python3 gitlab-inventory.py --config /path/to/config.ini --output /tmp/report.md
+python3 gitlab-inventory.py --config /path/to/config.ini --output /tmp/report.html --format html
+# With --format both, --output is treated as a base; the extension is replaced:
+python3 gitlab-inventory.py --output /tmp/report   # writes /tmp/report.md and /tmp/report.html
 ```
 
-Reports are written to `reports/gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>.md`
-by default. The `reports/` directory is gitignored.
+Reports are written to `reports/gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>.{md,html}`
+by default. The `reports/` directory is gitignored. The HTML file is fully
+self-contained (inline CSS, no JS, no external resources) so you can open it
+straight from your file system. It uses sticky table headers and zebra rows
+so the wide projects/users tables stay readable when scrolling.
 
 ## What it collects
 
@@ -48,9 +60,45 @@ Calls only `GET` endpoints under `/api/v4`:
 
 - `/version` — instance version
 - `/groups` — all groups visible to the token (paginated)
-- `/projects` — all projects visible to the token, including archived (paginated)
+- `/projects` — all projects visible to the token, including archived (paginated).
+  Each project shows which features are enabled (see "Project feature columns").
 - `/users` — all users (admin only; gracefully skipped on 403). Each user is
   classified by activity (see below).
+
+## Project feature columns
+
+GitLab lets each project enable or disable many built-in features. The
+projects table includes a `features` column listing the short names of the
+features that are currently enabled on that project. Below the table, a
+"Feature enablement summary" shows how many projects use each feature.
+
+A feature is considered enabled when its `*_access_level` field is anything
+other than `disabled` (e.g. `private`, `enabled`, `public`), or — for older
+boolean-style fields — when the `*_enabled` flag is true.
+
+Tracked features (short name → GitLab field):
+
+| short | GitLab field |
+|---|---|
+| issues | `issues_access_level` / `issues_enabled` |
+| mrs | `merge_requests_access_level` / `merge_requests_enabled` |
+| ci | `builds_access_level` / `jobs_enabled` |
+| wiki | `wiki_access_level` / `wiki_enabled` |
+| snippets | `snippets_access_level` / `snippets_enabled` |
+| registry | `container_registry_access_level` / `container_registry_enabled` |
+| packages | `packages_enabled` |
+| pages | `pages_access_level` |
+| lfs | `lfs_enabled` |
+| service_desk | `service_desk_enabled` |
+| releases | `releases_access_level` |
+| environments | `environments_access_level` |
+| feature_flags | `feature_flags_access_level` |
+| security | `security_and_compliance_access_level` |
+| analytics | `analytics_access_level` |
+| forking | `forking_access_level` |
+
+Features whose fields are not returned by your GitLab version appear as
+`n/a` in the summary instead of `0 / N`.
 
 ## User activity columns
 

@@ -132,3 +132,27 @@ No automated tests in this first cut; the script's surface is small and entirely
 - CI/CD variables and protected branches.
 - JSON sidecar output for diffing across runs.
 - Optional caching of paginated responses to disk.
+
+## Follow-ups implemented
+
+- **2026-04-29** — User activity / dormancy reporting added to the users
+  section: `last_activity_on`, `days_since_activity`, and an `interaction`
+  classification (`never` / `non-ui-only` / `ui-only` / `active`), plus a
+  summary block. No new endpoints; the fields are already returned by the
+  admin `/users` listing.
+- **2026-04-29** — Per-project feature enablement reporting added to the
+  projects section: a `features` column listing enabled features per project
+  (issues, mrs, ci, wiki, snippets, registry, packages, pages, lfs,
+  service_desk, releases, environments, feature_flags, security, analytics,
+  forking) and a "Feature enablement summary" table totalling each feature
+  across all projects. Driven by existing `/projects` payload — no new API
+  calls. Handles both new `*_access_level` fields and legacy `*_enabled`
+  booleans; reports `n/a` for features the GitLab version doesn't return.
+- **2026-04-29** — HTML output added alongside Markdown. New `--format`
+  flag (`md` / `html` / `both`, default `both`). HTML is a single
+  self-contained file (inline CSS, no JS, no external resources) with
+  sticky table headers, zebra striping, colour-coded badges for visibility
+  / archived / `is_admin` / interaction labels, and chips for enabled
+  project features — much more scannable than the wide Markdown tables.
+  No additional API calls or dependencies; rendering is driven from the
+  same in-memory data as the Markdown path.
