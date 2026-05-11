@@ -22,7 +22,18 @@ from urllib.request import Request, urlopen
 
 PER_PAGE = 100
 PAGE_SLEEP_SECONDS = 0.05
+COMMIT_SLEEP_SECONDS = 0.02
+MEMBER_SLEEP_SECONDS = 0.05
+INACTIVE_DAYS_DEFAULT = 180
 USER_AGENT = "secureloop-gitlab-inventory/0.1"
+
+ACCESS_LEVEL_NAMES = {
+    10: "Guest",
+    20: "Reporter",
+    30: "Developer",
+    40: "Maintainer",
+    50: "Owner",
+}
 
 
 class GitLabClient:
@@ -214,15 +225,105 @@ def enabled_features(project: dict) -> list[str]:
             if is_feature_enabled(project, access_f, legacy_f)]
 
 
+_UNKNOWN_COMMIT = object()
+
+
+def fetch_group_members(client: GitLabClient, group_id: int) -> list[dict]:
+    """Fetch direct (non-inherited) members of a single group, ordered by access level descending."""
+    try:
+        return list(client.paginate(
+            f"/groups/{group_id}/members",
+            {"order_by": "access_level", "sort": "desc"},
+        ))
+    except HTTPError:
+        return []
+
+
+def fetch_all_group_members(client: GitLabClient, groups: list[dict]) -> dict[int, list[dict]]:
+    """Return {group_id: [member, ...]} for every group. One paginated call per group."""
+    result: dict[int, list[dict]] = {}
+    for g in groups:
+        gid = g.get("id")
+        if gid is not None:
+            result[gid] = fetch_group_members(client, gid)
+            time.sleep(MEMBER_SLEEP_SECONDS)
+    return result
+
+
+def fetch_last_commit(client: GitLabClient, project_id: int) -> dict | None | object:
+    """Fetch the most recent commit on the default branch.
+
+    Returns the commit dict, None for an empty repo (404 / empty list), or the
+    sentinel _UNKNOWN_COMMIT if the call failed for another reason.
+    """
+    try:
+        data = client.get(f"/projects/{project_id}/repository/commits", {"per_page": 1})
+    except HTTPError as e:
+        if e.code == 404:
+            return None
+        return _UNKNOWN_COMMIT
+    except URLError:
+        return _UNKNOWN_COMMIT
+    if not data:
+        return None
+    return data[0]
+
+
+def classify_commit_state(
+    project: dict,
+    last_commit: dict | None | object,
+    today: date,
+    inactive_days: int,
+) -> tuple[str, str | None, int | None]:
+    """Return (state, last_commit_at, days_since_commit)."""
+    if not project.get("default_branch"):
+        return "empty", None, None
+    if last_commit is _UNKNOWN_COMMIT:
+        return "unknown", None, None
+    if last_commit is None:
+        return "empty", None, None
+    committed_at = last_commit.get("committed_date")  # type: ignore[union-attr]
+    days = days_since(committed_at, today)
+    if days is None:
+        return "unknown", committed_at, None
+    state = "inactive" if days >= inactive_days else "active"
+    return state, committed_at, days
+
+
+def fetch_commit_info(
+    client: GitLabClient,
+    projects: list[dict],
+    today: date,
+    inactive_days: int,
+) -> list[dict]:
+    """Build per-project commit info, mirroring the projects list order."""
+    info: list[dict] = []
+    for p in projects:
+        if not p.get("default_branch"):
+            state, committed_at, days = classify_commit_state(p, None, today, inactive_days)
+        else:
+            commit = fetch_last_commit(client, p.get("id"))
+            state, committed_at, days = classify_commit_state(p, commit, today, inactive_days)
+            time.sleep(COMMIT_SLEEP_SECONDS)
+        info.append({"state": state, "last_commit_at": committed_at, "days_since_commit": days})
+    return info
+
+
 def render_markdown(
     base_url: str,
     version: dict[str, str],
     groups: list[dict],
     projects: list[dict],
+    commit_info: list[dict],
     users: list[dict] | None,
     users_skip_reason: str | None,
     generated_at: datetime,
+    inactive_days: int,
+    group_members: dict[int, list[dict]] | None = None,
 ) -> str:
+    if group_members is None:
+        group_members = {}
+
     host = urlparse(base_url).hostname or base_url
     lines: list[str] = []
     lines.append(f"# GitLab Inventory — {host}")
@@ -246,15 +347,53 @@ def render_markdown(
     if not groups:
         lines.append("_No groups visible to this token._")
     else:
-        lines.append("| id | full_path | visibility | parent_id |")
-        lines.append("|---|---|---|---|")
+        lines.append("| id | full_path | visibility | parent_id | members |")
+        lines.append("|---|---|---|---|---|")
         for g in groups:
+            gid = g.get("id")
+            member_count = len(group_members.get(gid, [])) if gid is not None else ""
             lines.append(
-                f"| {md_escape(g.get('id'))} "
+                f"| {md_escape(gid)} "
                 f"| {md_escape(g.get('full_path'))} "
                 f"| {md_escape(g.get('visibility'))} "
-                f"| {md_escape(g.get('parent_id'))} |"
+                f"| {md_escape(g.get('parent_id'))} "
+                f"| {md_escape(member_count)} |"
             )
+    lines.append("")
+
+    # Group Membership section
+    lines.append("## Group Membership")
+    lines.append("")
+    lines.append(
+        "_Only direct members are shown. Members inherited from parent groups are not listed._"
+    )
+    lines.append("")
+    if not groups:
+        lines.append("_No groups visible to this token._")
+    else:
+        for g in sorted(groups, key=lambda x: x.get("full_path", "")):
+            gid = g.get("id")
+            full_path = g.get("full_path", str(gid))
+            members = group_members.get(gid, []) if gid is not None else []
+            member_label = f"{len(members)} member{'s' if len(members) != 1 else ''}"
+            lines.append(f"### {md_escape(full_path)} ({member_label})")
+            lines.append("")
+            if not members:
+                lines.append("_No direct members._")
+            else:
+                lines.append("| username | name | email | role | access_level |")
+                lines.append("|---|---|---|---|---|")
+                for m in members:
+                    level = m.get("access_level")
+                    role = ACCESS_LEVEL_NAMES.get(level, str(level)) if level is not None else ""
+                    lines.append(
+                        f"| {md_escape(m.get('username'))} "
+                        f"| {md_escape(m.get('name'))} "
+                        f"| {md_escape(m.get('email'))} "
+                        f"| {md_escape(role)} "
+                        f"| {md_escape(level)} |"
+                    )
+            lines.append("")
     lines.append("")
 
     lines.append("## Projects")
@@ -263,9 +402,30 @@ def render_markdown(
         lines.append("_No projects visible to this token._")
     else:
         per_project_features = [enabled_features(p) for p in projects]
-        lines.append("| full_path | visibility | archived | default_branch | last_activity_at | namespace_kind | features |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for p, feats in zip(projects, per_project_features):
+        commit_states = [info["state"] for info in commit_info]
+        commit_counts = {
+            "empty": commit_states.count("empty"),
+            "inactive": commit_states.count("inactive"),
+            "active": commit_states.count("active"),
+            "unknown": commit_states.count("unknown"),
+        }
+        lines.append("### Repository activity summary")
+        lines.append("")
+        lines.append(f"- empty (no commit ever): **{commit_counts['empty']}**")
+        lines.append(f"- inactive (≥ {inactive_days} days since last commit): **{commit_counts['inactive']}**")
+        lines.append(f"- active (< {inactive_days} days since last commit): **{commit_counts['active']}**")
+        if commit_counts["unknown"]:
+            lines.append(f"- unknown (commit lookup failed): **{commit_counts['unknown']}**")
+        lines.append("")
+        lines.append(
+            "_`last_commit_at` is the most recent commit on the default branch, "
+            "obtained via one extra API call per non-empty project. It differs from "
+            "`last_activity_at`, which also covers issues, MRs, and comments._"
+        )
+        lines.append("")
+        lines.append("| full_path | visibility | archived | default_branch | last_activity_at | last_commit_at | days_since_commit | commit_state | namespace_kind | features |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        for p, feats, info in zip(projects, per_project_features, commit_info):
             ns = p.get("namespace") or {}
             lines.append(
                 f"| {md_escape(p.get('path_with_namespace'))} "
@@ -273,6 +433,9 @@ def render_markdown(
                 f"| {md_escape(p.get('archived'))} "
                 f"| {md_escape(p.get('default_branch'))} "
                 f"| {md_escape(p.get('last_activity_at'))} "
+                f"| {md_escape(info.get('last_commit_at'))} "
+                f"| {md_escape(info.get('days_since_commit'))} "
+                f"| {md_escape(info.get('state'))} "
                 f"| {md_escape(ns.get('kind'))} "
                 f"| {md_escape(', '.join(feats))} |"
             )
@@ -326,13 +489,14 @@ def render_markdown(
             "granularity); `last_sign_in_at` is UI sign-ins only._"
         )
         lines.append("")
-        lines.append("| id | username | state | is_admin | last_sign_in_at | last_activity_on | days_since_activity | interaction |")
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("| id | username | email | state | is_admin | last_sign_in_at | last_activity_on | days_since_activity | interaction |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for u, label in zip(users, labels):
             d_activity = days_since(u.get("last_activity_on"), today)
             lines.append(
                 f"| {md_escape(u.get('id'))} "
                 f"| {md_escape(u.get('username'))} "
+                f"| {md_escape(u.get('email'))} "
                 f"| {md_escape(u.get('state'))} "
                 f"| {md_escape(u.get('is_admin'))} "
                 f"| {md_escape(u.get('last_sign_in_at'))} "
@@ -389,6 +553,15 @@ td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
 .i-non-ui-only { background: #fff3c4; color: #5a4100; }
 .i-ui-only     { background: #d6e9ff; color: #0a3d80; }
 .i-active      { background: #d9f5e1; color: #0e5a25; }
+.r-empty    { background: #f3d6ff; color: #5a1f7a; }
+.r-inactive { background: #ffd9d9; color: #8a1f1f; }
+.r-active   { background: #d9f5e1; color: #0e5a25; }
+.r-unknown  { background: #f3f3f3; color: #555; }
+.role-owner      { background: #ffe1e1; color: #8a1f1f; }
+.role-maintainer { background: #fff3c4; color: #5a4100; }
+.role-developer  { background: #d9f5e1; color: #0e5a25; }
+.role-reporter   { background: #eaf3ff; color: #0969da; }
+.role-guest      { background: #f3f3f3; color: #555; }
 """
 
 
@@ -435,6 +608,30 @@ def _interaction_badge(label: str) -> str:
     return f'<span class="badge {klass}">{_h(label)}</span>'
 
 
+def _commit_state_badge(state: str) -> str:
+    klass = {
+        "empty": "r-empty",
+        "inactive": "r-inactive",
+        "active": "r-active",
+        "unknown": "r-unknown",
+    }.get(state, "")
+    return f'<span class="badge {klass}">{_h(state)}</span>'
+
+
+def _role_badge(access_level: int | None) -> str:
+    if access_level is None:
+        return ""
+    name = ACCESS_LEVEL_NAMES.get(access_level, str(access_level))
+    klass = {
+        50: "role-owner",
+        40: "role-maintainer",
+        30: "role-developer",
+        20: "role-reporter",
+        10: "role-guest",
+    }.get(access_level, "role-guest")
+    return f'<span class="badge {klass}">{_h(name)}</span>'
+
+
 def _feature_chips(feats: list[str]) -> str:
     if not feats:
         return ""
@@ -446,10 +643,16 @@ def render_html(
     version: dict[str, str],
     groups: list[dict],
     projects: list[dict],
+    commit_info: list[dict],
     users: list[dict] | None,
     users_skip_reason: str | None,
     generated_at: datetime,
+    inactive_days: int,
+    group_members: dict[int, list[dict]] | None = None,
 ) -> str:
+    if group_members is None:
+        group_members = {}
+
     host = urlparse(base_url).hostname or base_url
     out: list[str] = []
     out.append("<!doctype html>")
@@ -487,18 +690,59 @@ def render_html(
         out.append('<p class="skipped">No groups visible to this token.</p>')
     else:
         out.append('<div class="table-wrap"><table>')
-        out.append("<thead><tr><th>id</th><th>full_path</th><th>visibility</th><th>parent_id</th></tr></thead>")
+        out.append("<thead><tr><th>id</th><th>full_path</th><th>visibility</th><th>parent_id</th><th>members</th></tr></thead>")
         out.append("<tbody>")
         for g in groups:
+            gid = g.get("id")
+            member_count = len(group_members.get(gid, [])) if gid is not None else ""
             out.append(
                 "<tr>"
                 f'<td class="numeric">{_h(g.get("id"))}</td>'
                 f'<td class="path">{_h(g.get("full_path"))}</td>'
                 f"<td>{_visibility_badge(g.get('visibility'))}</td>"
                 f'<td class="numeric">{_h(g.get("parent_id"))}</td>'
+                f'<td class="numeric">{_h(member_count)}</td>'
                 "</tr>"
             )
         out.append("</tbody></table></div>")
+
+    # Group Membership
+    out.append("<h2>Group Membership</h2>")
+    out.append(
+        '<p class="footnote">Only direct members are shown. '
+        "Members inherited from parent groups are not listed.</p>"
+    )
+    if not groups:
+        out.append('<p class="skipped">No groups visible to this token.</p>')
+    else:
+        for g in sorted(groups, key=lambda x: x.get("full_path", "")):
+            gid = g.get("id")
+            full_path = g.get("full_path", str(gid))
+            members = group_members.get(gid, []) if gid is not None else []
+            member_label = f"{len(members)} member{'s' if len(members) != 1 else ''}"
+            out.append(f"<h3>{_h(full_path)} <small>({_h(member_label)})</small></h3>")
+            if not members:
+                out.append('<p class="skipped">No direct members.</p>')
+            else:
+                out.append('<div class="table-wrap"><table>')
+                out.append(
+                    "<thead><tr>"
+                    "<th>username</th><th>name</th><th>email</th><th>role</th><th>access_level</th>"
+                    "</tr></thead>"
+                )
+                out.append("<tbody>")
+                for m in members:
+                    level = m.get("access_level")
+                    out.append(
+                        "<tr>"
+                        f'<td class="mono">{_h(m.get("username"))}</td>'
+                        f"<td>{_h(m.get('name'))}</td>"
+                        f'<td class="mono">{_h(m.get("email"))}</td>'
+                        f"<td>{_role_badge(level)}</td>"
+                        f'<td class="numeric">{_h(level)}</td>'
+                        "</tr>"
+                    )
+                out.append("</tbody></table></div>")
 
     # Projects
     out.append("<h2>Projects</h2>")
@@ -506,16 +750,35 @@ def render_html(
         out.append('<p class="skipped">No projects visible to this token.</p>')
     else:
         per_project_features = [enabled_features(p) for p in projects]
+        commit_states = [info["state"] for info in commit_info]
+        commit_counts = {k: commit_states.count(k) for k in ("empty", "inactive", "active", "unknown")}
+
+        out.append("<h3>Repository activity summary</h3>")
+        out.append('<ul class="summary">')
+        out.append(f'<li>{_commit_state_badge("empty")} (no commit ever): <strong>{commit_counts["empty"]}</strong></li>')
+        out.append(f'<li>{_commit_state_badge("inactive")} (≥ {inactive_days} days since last commit): <strong>{commit_counts["inactive"]}</strong></li>')
+        out.append(f'<li>{_commit_state_badge("active")} (&lt; {inactive_days} days since last commit): <strong>{commit_counts["active"]}</strong></li>')
+        if commit_counts["unknown"]:
+            out.append(f'<li>{_commit_state_badge("unknown")} (commit lookup failed): <strong>{commit_counts["unknown"]}</strong></li>')
+        out.append("</ul>")
+        out.append(
+            '<p class="footnote"><code>last_commit_at</code> is the most recent '
+            "commit on the default branch (one extra API call per non-empty "
+            "project). <code>last_activity_at</code> also covers issues, MRs, "
+            "and comments.</p>"
+        )
+
         out.append('<div class="table-wrap"><table>')
         out.append(
             "<thead><tr>"
             "<th>full_path</th><th>visibility</th><th>archived</th>"
             "<th>default_branch</th><th>last_activity_at</th>"
+            "<th>last_commit_at</th><th>days_since_commit</th><th>commit_state</th>"
             "<th>namespace_kind</th><th>features</th>"
             "</tr></thead>"
         )
         out.append("<tbody>")
-        for p, feats in zip(projects, per_project_features):
+        for p, feats, info in zip(projects, per_project_features, commit_info):
             ns = p.get("namespace") or {}
             out.append(
                 "<tr>"
@@ -524,6 +787,9 @@ def render_html(
                 f"<td>{_archived_cell(p.get('archived'))}</td>"
                 f'<td class="mono">{_h(p.get("default_branch"))}</td>'
                 f'<td class="mono">{_h(p.get("last_activity_at"))}</td>'
+                f'<td class="mono">{_h(info.get("last_commit_at"))}</td>'
+                f'<td class="numeric">{_h(info.get("days_since_commit"))}</td>'
+                f'<td>{_commit_state_badge(info.get("state", ""))}</td>'
                 f"<td>{_h(ns.get('kind'))}</td>"
                 f"<td>{_feature_chips(feats)}</td>"
                 "</tr>"
@@ -581,7 +847,7 @@ def render_html(
         out.append('<div class="table-wrap"><table>')
         out.append(
             "<thead><tr>"
-            "<th>id</th><th>username</th><th>state</th><th>is_admin</th>"
+            "<th>id</th><th>username</th><th>email</th><th>state</th><th>is_admin</th>"
             "<th>last_sign_in_at</th><th>last_activity_on</th>"
             "<th>days_since_activity</th><th>interaction</th>"
             "</tr></thead>"
@@ -593,6 +859,7 @@ def render_html(
                 "<tr>"
                 f'<td class="numeric">{_h(u.get("id"))}</td>'
                 f'<td class="mono">{_h(u.get("username"))}</td>'
+                f'<td class="mono">{_h(u.get("email"))}</td>'
                 f"<td>{_h(u.get('state'))}</td>"
                 f"<td>{_bool_badge(u.get('is_admin'))}</td>"
                 f'<td class="mono">{_h(u.get("last_sign_in_at"))}</td>'
@@ -627,6 +894,17 @@ def run_dry_run(client: GitLabClient, base_url: str) -> int:
             print(f"users endpoint: NOT accessible (HTTP {e.code}) — non-admin token")
         else:
             print(f"users endpoint: unexpected HTTP {e.code}")
+    # Sample the members endpoint using the first available group.
+    groups = fetch_groups(client)
+    if groups:
+        first_gid = groups[0].get("id")
+        try:
+            client.get(f"/groups/{first_gid}/members", {"per_page": 1})
+            print("members endpoint: accessible")
+        except HTTPError as e:
+            print(f"members endpoint: HTTP {e.code}")
+    else:
+        print("members endpoint: no groups to test against")
     return 0
 
 
@@ -657,6 +935,9 @@ def main(argv: list[str]) -> int:
                         help="Output path. With --format both, the extension is replaced with .md and .html.")
     parser.add_argument("--format", choices=["md", "html", "both"], default="both",
                         help="Output format(s). Default: both.")
+    parser.add_argument("--inactive-days", type=int, default=INACTIVE_DAYS_DEFAULT,
+                        help=f"Days without a commit on the default branch before a repo is "
+                             f"flagged 'inactive' (default: {INACTIVE_DAYS_DEFAULT}).")
     parser.add_argument("--dry-run", action="store_true", help="Only check reachability and users-endpoint access")
     args = parser.parse_args(argv)
 
@@ -670,14 +951,20 @@ def main(argv: list[str]) -> int:
     version = fetch_version(client)
     groups = fetch_groups(client)
     projects = fetch_projects(client)
+    commit_info = fetch_commit_info(client, projects, generated_at.date(), args.inactive_days)
     users, users_skip_reason = fetch_users(client)
+    group_members = fetch_all_group_members(client, groups)
 
     formats = ["md", "html"] if args.format == "both" else [args.format]
     paths = resolve_output_paths(args.output, formats, url, generated_at)
 
     renderers = {"md": render_markdown, "html": render_html}
     for fmt, path in paths.items():
-        content = renderers[fmt](url, version, groups, projects, users, users_skip_reason, generated_at)
+        content = renderers[fmt](
+            url, version, groups, projects, commit_info,
+            users, users_skip_reason, generated_at, args.inactive_days,
+            group_members=group_members,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
@@ -693,7 +980,12 @@ def main(argv: list[str]) -> int:
 
     host = urlparse(url).hostname or url
     user_summary = "users skipped" if users is None else f"{len(users)} users"
-    print(f"{host} ({version.get('version', 'unknown')}): {len(groups)} groups, {len(projects)} projects, {user_summary}")
+    total_memberships = sum(len(v) for v in group_members.values())
+    print(
+        f"{host} ({version.get('version', 'unknown')}): "
+        f"{len(groups)} groups ({total_memberships} direct memberships), "
+        f"{len(projects)} projects, {user_summary}"
+    )
     for fmt, path in paths.items():
         print(f"report ({fmt}): {path}")
     for fmt, path in latest_paths.items():
