@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Read-only inventory of a self-hosted GitLab 17.x instance.
 
-Produces a Markdown report listing groups, projects, and (admin only) users.
+Produces clear and anonymized reports from a normalized JSON inventory.
 """
 from __future__ import annotations
 
 import argparse
 import configparser
+import copy
 import html as html_lib
 import json
 import shutil
@@ -307,6 +308,311 @@ def fetch_commit_info(
             time.sleep(COMMIT_SLEEP_SECONDS)
         info.append({"state": state, "last_commit_at": committed_at, "days_since_commit": days})
     return info
+
+
+def normalize_version(version: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": version.get("version"),
+        "revision": version.get("revision"),
+    }
+
+
+def normalize_group(group: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": group.get("id"),
+        "full_path": group.get("full_path"),
+        "visibility": group.get("visibility"),
+        "parent_id": group.get("parent_id"),
+    }
+
+
+def normalize_group_member(member: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "username": member.get("username"),
+        "name": member.get("name"),
+        "email": member.get("email"),
+        "access_level": member.get("access_level"),
+    }
+
+
+def normalize_project(project: dict[str, Any]) -> dict[str, Any]:
+    namespace = project.get("namespace") or {}
+    normalized = {
+        "path_with_namespace": project.get("path_with_namespace"),
+        "visibility": project.get("visibility"),
+        "archived": project.get("archived"),
+        "default_branch": project.get("default_branch"),
+        "last_activity_at": project.get("last_activity_at"),
+        "namespace": {"kind": namespace.get("kind")},
+    }
+    for _, access_field, legacy_field in PROJECT_FEATURES:
+        if access_field and access_field in project:
+            normalized[access_field] = project.get(access_field)
+        if legacy_field and legacy_field in project:
+            normalized[legacy_field] = project.get(legacy_field)
+    return normalized
+
+
+def normalize_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "email": user.get("email"),
+        "state": user.get("state"),
+        "is_admin": user.get("is_admin"),
+        "last_sign_in_at": user.get("last_sign_in_at"),
+        "last_activity_on": user.get("last_activity_on"),
+    }
+
+
+def build_inventory(
+    base_url: str,
+    version: dict[str, Any],
+    groups: list[dict[str, Any]],
+    projects: list[dict[str, Any]],
+    commit_info: list[dict[str, Any]],
+    users: list[dict[str, Any]] | None,
+    users_skip_reason: str | None,
+    generated_at: datetime,
+    inactive_days: int,
+    group_members: dict[int, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build the clear canonical inventory persisted as JSON.
+
+    The inventory stores only fields consumed by the reports, not full GitLab
+    API responses.
+    """
+    normalized_members: dict[str, list[dict[str, Any]]] = {}
+    for group_id, members in group_members.items():
+        normalized_members[str(group_id)] = [normalize_group_member(m) for m in members]
+
+    return {
+        "schema_version": 1,
+        "privacy": "clear",
+        "base_url": base_url,
+        "generated_at": generated_at.isoformat(timespec="seconds"),
+        "inactive_days": inactive_days,
+        "version": normalize_version(version),
+        "groups": [normalize_group(g) for g in groups],
+        "group_members": normalized_members,
+        "projects": [normalize_project(p) for p in projects],
+        "commit_info": [dict(info) for info in commit_info],
+        "users": None if users is None else [normalize_user(u) for u in users],
+        "users_skip_reason": users_skip_reason,
+    }
+
+
+def collect_inventory(
+    client: GitLabClient,
+    base_url: str,
+    generated_at: datetime,
+    inactive_days: int,
+) -> dict[str, Any]:
+    version = fetch_version(client)
+    groups = fetch_groups(client)
+    projects = fetch_projects(client)
+    commit_info = fetch_commit_info(client, projects, generated_at.date(), inactive_days)
+    users, users_skip_reason = fetch_users(client)
+    group_members = fetch_all_group_members(client, groups)
+    return build_inventory(
+        base_url, version, groups, projects, commit_info,
+        users, users_skip_reason, generated_at, inactive_days, group_members,
+    )
+
+
+def load_inventory_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        sys.exit(f"error: inventory JSON not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        sys.exit(f"error: invalid inventory JSON {path}: {e}")
+    if not isinstance(data, dict):
+        sys.exit(f"error: inventory JSON {path} must contain an object")
+    return data
+
+
+def write_inventory_json(inventory: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def inventory_generated_at(inventory: dict[str, Any]) -> datetime:
+    value = inventory.get("generated_at")
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        sys.exit("error: inventory is missing generated_at")
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        sys.exit(f"error: inventory has invalid generated_at: {value}")
+
+
+def inventory_group_members_for_render(inventory: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
+    result: dict[int, list[dict[str, Any]]] = {}
+    for key, members in (inventory.get("group_members") or {}).items():
+        try:
+            group_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        result[group_id] = list(members or [])
+    return result
+
+
+def render_from_inventory(fmt: str, inventory: dict[str, Any]) -> str:
+    renderers = {"md": render_markdown, "html": render_html}
+    generated_at = inventory_generated_at(inventory)
+    return renderers[fmt](
+        str(inventory.get("base_url") or ""),
+        inventory.get("version") or {},
+        inventory.get("groups") or [],
+        inventory.get("projects") or [],
+        inventory.get("commit_info") or [],
+        inventory.get("users"),
+        inventory.get("users_skip_reason"),
+        generated_at,
+        int(inventory.get("inactive_days") or INACTIVE_DAYS_DEFAULT),
+        group_members=inventory_group_members_for_render(inventory),
+    )
+
+
+def _next_alias(mapping: dict[Any, int], key: Any) -> int:
+    if key not in mapping:
+        mapping[key] = len(mapping) + 1
+    return mapping[key]
+
+
+def anonymize_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
+    anonymized = copy.deepcopy(inventory)
+    anonymized["privacy"] = "anonymized"
+    anonymized["base_url"] = "https://gitlab.example.invalid"
+
+    groups = inventory.get("groups") or []
+    group_id_aliases: dict[Any, int] = {}
+    for group in sorted(groups, key=lambda g: str(g.get("full_path") or "")):
+        group_id = group.get("id")
+        if group_id is not None:
+            _next_alias(group_id_aliases, group_id)
+
+    group_path_aliases: dict[str, str] = {}
+
+    def anonymize_group_path(path: Any) -> Any:
+        if not path:
+            return path
+        segments = str(path).split("/")
+        aliases: list[str] = []
+        for index in range(len(segments)):
+            prefix = "/".join(segments[:index + 1])
+            if prefix not in group_path_aliases:
+                group_path_aliases[prefix] = f"group-{len(group_path_aliases) + 1:03d}"
+            aliases.append(group_path_aliases[prefix])
+        return "/".join(aliases)
+
+    for group in sorted(groups, key=lambda g: str(g.get("full_path") or "")):
+        anonymize_group_path(group.get("full_path"))
+
+    project_path_aliases: dict[str, str] = {}
+
+    def anonymize_project_path(path: Any) -> Any:
+        if not path:
+            return path
+        text = str(path)
+        segments = text.split("/")
+        if text not in project_path_aliases:
+            project_path_aliases[text] = f"project-{len(project_path_aliases) + 1:03d}"
+        project_alias = project_path_aliases[text]
+        if len(segments) == 1:
+            return project_alias
+        namespace_aliases = []
+        for index in range(len(segments) - 1):
+            namespace_aliases.append(anonymize_group_path("/".join(segments[:index + 1])))
+        return "/".join(namespace_aliases + [project_alias])
+
+    branch_aliases: dict[Any, int] = {}
+
+    def anonymize_branch(branch: Any) -> Any:
+        if not branch:
+            return branch
+        return f"branch-{_next_alias(branch_aliases, branch):03d}"
+
+    anonymized_groups = anonymized.get("groups") or []
+    for group in anonymized_groups:
+        original_id = group.get("id")
+        original_parent_id = group.get("parent_id")
+        group["id"] = group_id_aliases.get(original_id) if original_id is not None else None
+        group["parent_id"] = group_id_aliases.get(original_parent_id) if original_parent_id is not None else None
+        group["full_path"] = anonymize_group_path(group.get("full_path"))
+
+    user_aliases_by_key: dict[tuple[str, Any], int] = {}
+
+    def register_user(user_id: Any, username: Any, email: Any) -> int:
+        keys = []
+        if user_id is not None:
+            keys.append(("id", user_id))
+        if username:
+            keys.append(("username", username))
+        if email:
+            keys.append(("email", email))
+        for key in keys:
+            if key in user_aliases_by_key:
+                alias = user_aliases_by_key[key]
+                break
+        else:
+            alias = len(set(user_aliases_by_key.values())) + 1
+        for key in keys:
+            user_aliases_by_key[key] = alias
+        return alias
+
+    for user in sorted(inventory.get("users") or [], key=lambda u: str(u.get("username") or u.get("id") or "")):
+        register_user(user.get("id"), user.get("username"), user.get("email"))
+    for _, members in sorted((inventory.get("group_members") or {}).items(), key=lambda item: str(item[0])):
+        for member in sorted(members or [], key=lambda m: str(m.get("username") or m.get("email") or "")):
+            register_user(None, member.get("username"), member.get("email"))
+
+    def anonymized_user_values(user_id: Any, username: Any, email: Any) -> tuple[int, str, str, str]:
+        alias = register_user(user_id, username, email)
+        return alias, f"user-{alias:03d}", f"User {alias:03d}", f"user-{alias:03d}@example.invalid"
+
+    if anonymized.get("users") is not None:
+        for user in anonymized.get("users") or []:
+            alias, username, _, email = anonymized_user_values(
+                user.get("id"), user.get("username"), user.get("email"),
+            )
+            user["id"] = alias
+            user["username"] = username
+            user["email"] = email
+
+    anonymized_members: dict[str, list[dict[str, Any]]] = {}
+    for original_group_id, members in (inventory.get("group_members") or {}).items():
+        try:
+            group_key: Any = int(original_group_id)
+        except (TypeError, ValueError):
+            group_key = original_group_id
+        anonymized_group_id = group_id_aliases.get(group_key)
+        if anonymized_group_id is None:
+            continue
+        anonymized_members[str(anonymized_group_id)] = []
+        for member in members or []:
+            _, username, name, email = anonymized_user_values(
+                None, member.get("username"), member.get("email"),
+            )
+            anonymized_members[str(anonymized_group_id)].append({
+                "username": username,
+                "name": name,
+                "email": email,
+                "access_level": member.get("access_level"),
+            })
+    anonymized["group_members"] = anonymized_members
+
+    for project in anonymized.get("projects") or []:
+        project["path_with_namespace"] = anonymize_project_path(project.get("path_with_namespace"))
+        project["default_branch"] = anonymize_branch(project.get("default_branch"))
+
+    return anonymized
 
 
 def render_markdown(
@@ -908,23 +1214,34 @@ def run_dry_run(client: GitLabClient, base_url: str) -> int:
     return 0
 
 
-def resolve_output_paths(
+def requested_report_variants(privacy: str) -> list[str]:
+    return ["clear", "anonymized"] if privacy == "both" else [privacy]
+
+
+def resolve_report_paths(
     user_path: Path | None,
     formats: list[str],
+    variants: list[str],
     base_url: str,
     generated_at: datetime,
-) -> dict[str, Path]:
-    """Return {format: path} for each requested format.
+) -> dict[tuple[str, str], Path]:
+    """Return {(variant, format): path} for each requested report artifact."""
+    if user_path and len(formats) == 1 and len(variants) == 1:
+        return {(variants[0], formats[0]): user_path}
 
-    With a user-supplied --output and a single format, write to that exact path.
-    With multiple formats, treat --output as a base path (extension stripped) and
-    append .md / .html. Without --output, use the default reports/ pattern.
-    """
     base = user_path.with_suffix("") if user_path else default_output_base(base_url, generated_at)
-    if user_path and len(formats) == 1:
-        return {formats[0]: user_path}
     ext = {"md": ".md", "html": ".html"}
-    return {fmt: base.with_suffix(ext[fmt]) for fmt in formats}
+    paths: dict[tuple[str, str], Path] = {}
+    for variant in variants:
+        variant_base = base if variant == "clear" else base.with_name(f"{base.name}-anonymized")
+        for fmt in formats:
+            paths[(variant, fmt)] = variant_base.with_suffix(ext[fmt])
+    return paths
+
+
+def resolve_inventory_json_path(user_path: Path | None, base_url: str, generated_at: datetime) -> Path:
+    base = user_path.with_suffix("") if user_path else default_output_base(base_url, generated_at)
+    return base.with_suffix(".json")
 
 
 def main(argv: list[str]) -> int:
@@ -932,53 +1249,72 @@ def main(argv: list[str]) -> int:
     default_config = Path(__file__).resolve().parent / "config.ini"
     parser.add_argument("--config", type=Path, default=default_config, help="Path to config.ini")
     parser.add_argument("--output", type=Path, default=None,
-                        help="Output path. With --format both, the extension is replaced with .md and .html.")
+                        help="Output path/base. Multiple report artifacts replace the extension with .md/.html and add suffixes.")
     parser.add_argument("--format", choices=["md", "html", "both"], default="both",
-                        help="Output format(s). Default: both.")
+                        help="Report output format(s). Default: both.")
+    parser.add_argument("--privacy", choices=["clear", "anonymized", "both"], default="both",
+                        help="Report privacy variant(s). Default: both.")
+    parser.add_argument("--from-json", type=Path, default=None,
+                        help="Render reports from an existing clear inventory JSON instead of calling GitLab.")
     parser.add_argument("--inactive-days", type=int, default=INACTIVE_DAYS_DEFAULT,
                         help=f"Days without a commit on the default branch before a repo is "
                              f"flagged 'inactive' (default: {INACTIVE_DAYS_DEFAULT}).")
     parser.add_argument("--dry-run", action="store_true", help="Only check reachability and users-endpoint access")
     args = parser.parse_args(argv)
 
-    url, token, verify_tls = load_config(args.config)
-    client = GitLabClient(url, token, verify_tls)
+    if args.from_json and args.dry_run:
+        parser.error("--dry-run cannot be used with --from-json")
 
-    if args.dry_run:
-        return run_dry_run(client, url)
+    inventory_json_path: Path | None = None
+    if args.from_json:
+        inventory = load_inventory_json(args.from_json)
+        generated_at = inventory_generated_at(inventory)
+    else:
+        url, token, verify_tls = load_config(args.config)
+        client = GitLabClient(url, token, verify_tls)
+        if args.dry_run:
+            return run_dry_run(client, url)
 
-    generated_at = datetime.now(timezone.utc)
-    version = fetch_version(client)
-    groups = fetch_groups(client)
-    projects = fetch_projects(client)
-    commit_info = fetch_commit_info(client, projects, generated_at.date(), args.inactive_days)
-    users, users_skip_reason = fetch_users(client)
-    group_members = fetch_all_group_members(client, groups)
+        generated_at = datetime.now(timezone.utc)
+        inventory = collect_inventory(client, url, generated_at, args.inactive_days)
+        inventory_json_path = resolve_inventory_json_path(args.output, url, generated_at)
+        write_inventory_json(inventory, inventory_json_path)
 
+    base_url = str(inventory.get("base_url") or "gitlab")
     formats = ["md", "html"] if args.format == "both" else [args.format]
-    paths = resolve_output_paths(args.output, formats, url, generated_at)
+    variants = requested_report_variants(args.privacy)
+    report_inventories = {"clear": inventory}
+    if "anonymized" in variants:
+        report_inventories["anonymized"] = anonymize_inventory(inventory)
+    paths = resolve_report_paths(args.output, formats, variants, base_url, generated_at)
 
-    renderers = {"md": render_markdown, "html": render_html}
-    for fmt, path in paths.items():
-        content = renderers[fmt](
-            url, version, groups, projects, commit_info,
-            users, users_skip_reason, generated_at, args.inactive_days,
-            group_members=group_members,
-        )
+    for (variant, fmt), path in paths.items():
+        content = render_from_inventory(fmt, report_inventories[variant])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    # Maintain a stable copy at reports/latest.<ext> for serving over HTTP.
+    # Maintain stable copies at reports/latest*.{md,html,json} for serving over HTTP.
     # Only when output goes to the default reports/ directory; if the user
     # passed --output we honour that path exactly and don't write anywhere else.
     latest_paths: dict[str, Path] = {}
     if args.output is None:
-        for fmt, path in paths.items():
-            latest = path.with_name(f"latest.{fmt}")
+        if inventory_json_path is not None:
+            latest_json = inventory_json_path.with_name("latest.json")
+            shutil.copyfile(inventory_json_path, latest_json)
+            latest_paths["json"] = latest_json
+        for (variant, fmt), path in paths.items():
+            suffix = "" if variant == "clear" else "-anonymized"
+            latest = path.with_name(f"latest{suffix}.{fmt}")
             shutil.copyfile(path, latest)
-            latest_paths[fmt] = latest
+            latest_label = fmt if variant == "clear" else f"{variant} {fmt}"
+            latest_paths[latest_label] = latest
 
-    host = urlparse(url).hostname or url
+    groups = inventory.get("groups") or []
+    projects = inventory.get("projects") or []
+    users = inventory.get("users")
+    group_members = inventory.get("group_members") or {}
+    version = inventory.get("version") or {}
+    host = urlparse(base_url).hostname or base_url
     user_summary = "users skipped" if users is None else f"{len(users)} users"
     total_memberships = sum(len(v) for v in group_members.values())
     print(
@@ -986,10 +1322,15 @@ def main(argv: list[str]) -> int:
         f"{len(groups)} groups ({total_memberships} direct memberships), "
         f"{len(projects)} projects, {user_summary}"
     )
-    for fmt, path in paths.items():
-        print(f"report ({fmt}): {path}")
-    for fmt, path in latest_paths.items():
-        print(f"latest ({fmt}): {path}")
+    if inventory_json_path is not None:
+        print(f"inventory (json): {inventory_json_path}")
+    elif args.from_json:
+        print(f"inventory source (json): {args.from_json}")
+    for (variant, fmt), path in paths.items():
+        label = fmt if variant == "clear" else f"{variant} {fmt}"
+        print(f"report ({label}): {path}")
+    for label, path in latest_paths.items():
+        print(f"latest ({label}): {path}")
     return 0
 
 

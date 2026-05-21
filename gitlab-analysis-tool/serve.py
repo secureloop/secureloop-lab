@@ -33,7 +33,10 @@ def serve(bind: str, port: int) -> None:
     server = ThreadingHTTPServer((bind, port), handler)
     print(f"serving {REPORTS_DIR} on:")
     print(f"  http://{bind}:{port}/latest.html")
+    print(f"  http://{bind}:{port}/latest-anonymized.html")
     print(f"  http://{bind}:{port}/latest.md")
+    print(f"  http://{bind}:{port}/latest-anonymized.md")
+    print(f"  http://{bind}:{port}/latest.json")
     if bind in ("0.0.0.0", "::"):
         try:
             host = socket.gethostname()

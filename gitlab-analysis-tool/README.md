@@ -1,7 +1,8 @@
 # GitLab Analysis Tool
 
-Read-only inventory of a self-hosted GitLab 17.x instance. Produces a Markdown
-report listing groups, projects, and (if the token has admin scope) users.
+Read-only inventory of a self-hosted GitLab 17.x instance. Produces a clear
+JSON inventory plus clear and anonymized Markdown/HTML reports listing groups,
+projects, and (if the token has admin scope) users.
 
 ## Requirements
 
@@ -27,7 +28,7 @@ Reachability check:
 python3 gitlab-inventory.py --dry-run
 ```
 
-Full inventory (writes both Markdown and HTML by default):
+Full inventory (writes clear JSON plus clear and anonymized Markdown/HTML by default):
 
 ```bash
 python3 gitlab-inventory.py
@@ -40,25 +41,52 @@ python3 gitlab-inventory.py --format html
 python3 gitlab-inventory.py --format md
 ```
 
+Pick a privacy variant:
+
+```bash
+python3 gitlab-inventory.py --privacy clear       # clear reports only
+python3 gitlab-inventory.py --privacy anonymized  # anonymized reports only
+python3 gitlab-inventory.py --privacy both        # default
+```
+
+Render reports from an existing clear inventory JSON without calling GitLab:
+
+```bash
+python3 gitlab-inventory.py --from-json reports/latest.json --privacy both
+```
+
 Custom config or output path:
 
 ```bash
-python3 gitlab-inventory.py --config /path/to/config.ini --output /tmp/report.html --format html
-# With --format both, --output is treated as a base; the extension is replaced:
-python3 gitlab-inventory.py --output /tmp/report   # writes /tmp/report.md and /tmp/report.html
+python3 gitlab-inventory.py --config /path/to/config.ini --output /tmp/report.html --format html --privacy clear
+# With multiple report artifacts, --output is treated as a base; the extension is replaced:
+python3 gitlab-inventory.py --output /tmp/report   # writes /tmp/report.json, clear reports, and anonymized reports
 ```
 
-Reports are written to `reports/gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>.{md,html}`
-by default. The `reports/` directory is gitignored. The HTML file is fully
-self-contained (inline CSS, no JS, no external resources) so you can open it
-straight from your file system. It uses sticky table headers and zebra rows
-so the wide projects/users tables stay readable when scrolling.
+Tune the inactivity threshold (days without a commit on the default branch
+before a repo is flagged `inactive`):
 
-For convenience, every default-output run also writes
-`reports/latest.md` and `reports/latest.html` — copies of the freshly
-created timestamped files. Useful if something always wants the same path.
-This only happens when `--output` is not supplied; with an explicit
-`--output` only the path you give is written.
+```bash
+python3 gitlab-inventory.py --inactive-days 90   # default: 180
+```
+
+Reports are written to timestamped files under `reports/` by default:
+
+- `gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>.json` — clear canonical inventory
+- `gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>.{md,html}` — clear reports
+- `gitlab-inventory-<host>-<YYYYMMDD-HHMMSS>-anonymized.{md,html}` — anonymized reports
+
+The `reports/` directory is gitignored. The HTML files are fully self-contained
+(inline CSS, no JS, no external resources) so you can open them straight from
+your file system. They use sticky table headers and zebra rows so the wide
+projects/users tables stay readable when scrolling.
+
+For convenience, every default live inventory run also writes stable copies:
+`reports/latest.json`, `reports/latest.md`, `reports/latest.html`,
+`reports/latest-anonymized.md`, and `reports/latest-anonymized.html`.
+This only happens when `--output` is not supplied; with an explicit `--output`
+only the requested output base is written. When rendering with `--from-json`,
+the JSON source is reused and only report files are regenerated.
 
 ## Serving reports over HTTP
 
@@ -74,13 +102,30 @@ python3 serve.py --bind 127.0.0.1 # localhost only
 python3 serve.py --config /path/to/config.ini
 ```
 
-Open `http://<host>:8765/latest.html` (or `latest.md`).
+Open `http://<host>:8765/latest.html` (or `latest-anonymized.html`,
+`latest.md`, `latest-anonymized.md`, `latest.json`).
 
 The server binds `0.0.0.0` by default because this tool is intended for
-use inside an isolated lab network. The reports include user data and
-admin metadata — do **not** expose the port on the public internet. If
-that ever becomes a concern, pass `--bind 127.0.0.1` or put it behind a
-real reverse proxy with auth.
+use inside an isolated lab network. The clear reports and `latest.json`
+include user data and admin metadata — do **not** expose the port on the
+public internet. If that ever becomes a concern, pass `--bind 127.0.0.1`
+or put it behind a real reverse proxy with auth.
+
+## Inventory JSON and anonymization
+
+The JSON inventory is the clear canonical source for report generation. It is
+not an anonymized artifact and should be handled like the clear reports.
+
+The JSON inventory is normalized: it contains only the fields consumed by the
+reports plus derived values such as commit state. It does not persist full
+GitLab API responses.
+
+The anonymized reports are derived from an in-memory copy of the clear inventory.
+They replace host, group paths, project paths, usernames, names, emails, user IDs,
+group IDs, parent group IDs, group-member references, and branch names with
+deterministic placeholders such as `group-001`, `project-001`, `user-001`, and
+`branch-001`. Operational metadata such as visibility, feature enablement,
+roles, activity states, and timestamps is preserved so the report remains useful.
 
 ## What it collects
 
@@ -90,6 +135,9 @@ Calls only `GET` endpoints under `/api/v4`:
 - `/groups` — all groups visible to the token (paginated)
 - `/projects` — all projects visible to the token, including archived (paginated).
   Each project shows which features are enabled (see "Project feature columns").
+- `/projects/:id/repository/commits?per_page=1` — one extra call per non-empty
+  project to fetch the latest commit on the default branch (see "Repository
+  activity"). Skipped for projects with no `default_branch` (empty repo).
 - `/users` — all users (admin only; gracefully skipped on 403). Each user is
   classified by activity (see below).
 
@@ -127,6 +175,30 @@ Tracked features (short name → GitLab field):
 
 Features whose fields are not returned by your GitLab version appear as
 `n/a` in the summary instead of `0 / N`.
+
+## Repository activity
+
+The Projects table includes three commit-derived columns:
+
+- `last_commit_at` — `committed_date` of the most recent commit on the
+  project's default branch. Distinct from `last_activity_at`, which also bumps
+  on issue/MR/comment activity. Empty for repos that have never seen a commit.
+- `days_since_commit` — `today − last_commit_at` in whole days, or empty for
+  empty repos.
+- `commit_state` — derived label:
+  - `empty` — `default_branch` is null (no commit ever).
+  - `inactive` — last commit is at least `--inactive-days` old (default 180).
+  - `active` — last commit is more recent than that.
+  - `unknown` — the commits lookup failed for an unexpected reason; counted
+    in the summary but rare.
+
+A "Repository activity summary" block above the Projects table totals each
+state. The threshold used in that block reflects whatever `--inactive-days`
+value the run used.
+
+Cost: one extra `GET /repository/commits?per_page=1` per non-empty project.
+On instances with thousands of projects this adds noticeable wall time but no
+heavy load (one tiny request per project).
 
 ## User activity columns
 
