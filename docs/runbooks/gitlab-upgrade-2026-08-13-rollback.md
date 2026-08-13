@@ -17,8 +17,9 @@ Companions: [Pre-flight](gitlab-upgrade-2026-08-13-preflight.md) · [Runbook](gi
 
 ## STEP ZERO — IS ARGO CD SUSPENDED?
 
-**Before any recovery command.** If Argo auto-sync is live it will fight every step below —
-recreating the PVC you just deleted, resetting `replicas`, reverting the image.
+**Before any recovery command.** This Application has **`selfHeal: true`**. If it is live it
+will fight every step below — recreating the PVC you just deleted, resetting `replicas` so a
+pod starts on top of your restore, reverting the image.
 
 ```bash
 kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.spec.syncPolicy}{"\n"}'
@@ -29,9 +30,28 @@ If the output contains `automated`, suspend it **now**:
 ```bash
 kubectl patch application "$ARGOAPP" -n argocd --type=merge \
   -p '{"spec":{"syncPolicy":{"automated":null}}}'
+
+# If an ApplicationSet owns this app, the patch above gets regenerated away.
+kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.metadata.ownerReferences}{"\n"}'
+# If that shows an ApplicationSet, also:
+# kubectl scale deployment argocd-applicationset-controller -n argocd --replicas=0
 ```
 
-- [ ] Output no longer contains `automated` → continue
+**Prove it, do not assume it** — this takes 4 minutes and it is worth every second:
+
+```bash
+kubectl label deployment "$DEPLOY" -n "$NS" rollback-test=1 --overwrite
+sleep 240
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.metadata.labels.rollback-test}{"\n"}'
+# Expect: 1     -- if the label vanished, Argo is STILL reconciling. Do not proceed.
+```
+
+- [ ] Output no longer contains `automated`
+- [ ] ApplicationSet ownership checked and handled
+- [ ] **Drift label survived 4 minutes** → continue
+
+Remember to remove `rollback-test` before re-enabling sync later:
+`kubectl label deployment "$DEPLOY" -n "$NS" rollback-test-`
 
 > **`kubectl rollout undo` is NOT a rollback.** It reverts the pod template and nothing else.
 > The database has already migrated forward. Running an older GitLab against a newer schema

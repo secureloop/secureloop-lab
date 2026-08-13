@@ -8,6 +8,19 @@
 > **Do not start this document until the pre-flight go/no-go is signed off.**
 > In particular: PostgreSQL must already be ≥ 16.5, and the restore must have been rehearsed.
 
+> # ⚠ ARGO CD `selfHeal: true` — DO PHASE A0 FIRST
+>
+> This Application self-heals. Argo actively reverts anything you change by hand, within
+> seconds. **If you run any other command in this runbook before completing Phase A0:**
+>
+> - `kubectl scale --replicas=0` → Argo scales it back to 1, **starting a GitLab pod in the
+>   middle of your snapshot**, giving you a silently inconsistent snapshot.
+> - `kubectl set image` → Argo reverts to `17.11.7-ce.0`, restarting the pod on the **old
+>   image against a partially migrated schema**. This is the worst outcome available today.
+> - Probe and grace-period patches → reverted, so a probe kills the pod mid-migration.
+>
+> **Phase A0 is not a precaution. It is the first step of the window.**
+
 ---
 
 ## Deployment + Argo CD + Kustomize — read this first
@@ -15,15 +28,14 @@
 This instance runs as a **`Deployment`** (not a StatefulSet), managed by **Argo CD** from a
 **Kustomize** overlay. That changes four things. Nothing else in this runbook changes.
 
-### 1. Argo CD will undo your work — disable auto-sync before you touch anything
+### 1. Argo CD self-heals — **confirmed `selfHeal: true`**
 
 Every `kubectl set image`, `kubectl patch`, and `kubectl scale` in this runbook is an
-imperative change that diverges from Git. **If the Argo Application has `selfHeal: true`,
-Argo will revert it — potentially while migrations are running.** Argo restoring
-`replicas: 1` during a snapshot, or reverting the image mid-migration, is the worst
-failure mode available in this window.
+imperative change that diverges from Git, and this Application is configured to revert
+drift automatically within seconds.
 
-This is a **blocking prerequisite**, handled in Phase A0.
+This is not a hypothetical. **Phase A0 is the first step of the window**, it includes a
+positive test that suspension actually took effect, and nothing else may run before it.
 
 ### 2. Pod names change on every restart
 
@@ -125,6 +137,7 @@ on 18.2.8 or 18.5.7 or 18.8.11. Finish the remaining hops in a later window.
 
 | Time | Phase | Deadline | If missed |
 |---|---|---|---|
+| 13:10 | **Phase A0 — suspend Argo CD** (incl. 4-min drift test) | 13:30 | Do not start the window |
 | 13:30 | Pre-window checks | — | Postpone the window |
 | 14:00 | Quiesce + final backup | 14:30 | Postpone the window |
 | 14:30 | **Hop 1 → 18.2.8** | 15:15 | Roll back to 17.11.7, end window |
@@ -184,21 +197,32 @@ gl gitlab-ctl status && kubectl get pods -n "$NS"
 
 ---
 
-## Phase A0 — 13:20 Take Argo CD out of the loop — **BLOCKING**
+## Phase A0 — 13:10 Take Argo CD out of the loop — **BLOCKING**
 
 Nothing else in this runbook is safe until this is done.
 
-### A0.1 Find out what Argo is currently allowed to do
+### A0.1 Confirm the starting state, and check who owns the Application
+
+`selfHeal: true` is already confirmed. Record the exact policy anyway — you restore it later.
 
 ```bash
 kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.spec.syncPolicy}{"\n"}'
 ```
 
-| Output contains | Meaning | Risk |
+**Then check whether an ApplicationSet owns this Application:**
+
+```bash
+kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.metadata.ownerReferences}{"\n"}'
+```
+
+| Result | Meaning | What to do |
 |---|---|---|
-| `"selfHeal":true` | Argo actively reverts drift | **Critical — will fight you mid-migration** |
-| `"automated":{...}` without selfHeal | Argo syncs on Git changes only | Moderate — a teammate's commit triggers a sync |
-| `{}` or absent | Manual sync only | Low, but suspend anyway |
+| Empty | Standalone Application | A0.2 works as written |
+| Contains `ApplicationSet` | **An ApplicationSet controller owns it** | Patching the Application is **not enough** — the controller regenerates it and your suspension is undone. See A0.2b. |
+
+> This is the trap that makes people think they suspended Argo when they did not. An
+> ApplicationSet will quietly restore `syncPolicy` from its template, and you will discover
+> it when Argo reverts your image mid-hop.
 
 ### A0.2 Suspend it
 
@@ -223,11 +247,58 @@ argocd app set "$ARGOAPP" --sync-policy none
 argocd app get "$ARGOAPP" | grep -i "sync policy"
 ```
 
+### A0.2b If an ApplicationSet owns the Application
+
+Patching the Application alone will be undone. Either:
+
+**Option 1 — set the preserve annotation** (ApplicationSet respects it):
+
+```bash
+kubectl patch applicationset <APPSET-NAME> -n argocd --type=merge \
+  -p '{"spec":{"syncPolicy":{"preserveResourcesOnDeletion":true}}}'
+```
+
+**Option 2 — pause the ApplicationSet controller** (blunt, effective, affects all apps it
+manages — coordinate with your team first):
+
+```bash
+kubectl scale deployment argocd-applicationset-controller -n argocd --replicas=0
+```
+
+Whichever you choose, re-apply the A0.2 patch afterwards and re-verify.
+
+- [ ] Application is standalone, **or** ApplicationSet handled
+
+### A0.3 Prove the suspension actually worked — do not assume
+
+Suspending and *verifying* suspension are different things. Create harmless drift and
+confirm Argo leaves it alone.
+
+```bash
+# Introduce trivial, reversible drift
+kubectl label deployment "$DEPLOY" -n "$NS" upgrade-window=2026-08-13 --overwrite
+
+# Wait past Argo's reconciliation interval (default 180s), then check it survived
+sleep 240
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.metadata.labels.upgrade-window}{"\n"}'
+```
+
+**Expected: `2026-08-13`.** If the label has vanished, Argo is still reconciling — **stop,
+and do not proceed to Phase A.** Re-check A0.1 ownership and A0.2.
+
+Also confirm Argo now reports the app as out of sync but is *not* acting on it:
+
+```bash
+argocd app get "$ARGOAPP" | grep -iE "sync (status|policy)"
+```
+
+- [ ] Drift label survived 4 minutes → **self-heal is genuinely off**
 - [ ] `spec.syncPolicy.automated` is gone
 - [ ] Original policy saved to `~/gitlab-upgrade-2026-08-13/argocd-syncpolicy.json`
 - [ ] **Team told not to merge anything touching this Application today**
+- [ ] **Team told not to re-enable sync or run `argocd app sync` until you say so**
 
-### A0.3 Set the Deployment strategy to Recreate
+### A0.4 Set the Deployment strategy to Recreate
 
 Belt-and-braces against two GitLab pods ever existing at once:
 
@@ -845,7 +916,20 @@ kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{..image}{"\n"}'
 
 Both must read `gitlab/gitlab-ce:18.11.9-ce.0`.
 
-#### H3.3 Diff before letting Argo act
+#### H3.3 Remove the drift you introduced deliberately
+
+The A0.3 test label and, if you used it, the paused ApplicationSet controller both have to
+go before Argo resumes.
+
+```bash
+kubectl label deployment "$DEPLOY" -n "$NS" upgrade-window-
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.metadata.labels}{"\n"}'
+
+# Only if you scaled it down in A0.2b
+# kubectl scale deployment argocd-applicationset-controller -n argocd --replicas=1
+```
+
+#### H3.4 Diff before letting Argo act
 
 ```bash
 argocd app diff "$ARGOAPP"
@@ -855,7 +939,7 @@ argocd app diff "$ARGOAPP"
 `replicas`, `strategy`, or the probes, fix Git until it does not. Do not proceed on a
 non-empty diff — read every line and understand it.
 
-#### H3.4 Restore the sync policy
+#### H3.5 Restore the sync policy
 
 ```bash
 cat ~/gitlab-upgrade-2026-08-13/argocd-syncpolicy.json; echo
