@@ -2,7 +2,7 @@
 
 **Window:** 13.08.2026, 14:00
 **Path:** 17.11.7 → 18.2.8 → 18.5.7 → 18.8.11 → 18.11.9
-**Deployment:** Omnibus `gitlab-ee` image, single pod on Kubernetes, all services in-pod
+**Deployment:** Omnibus `gitlab-ce` image, single pod on Kubernetes, all services in-pod
 **Companion documents:** [Runbook](gitlab-upgrade-2026-08-13-runbook.md) · [Rollback](gitlab-upgrade-2026-08-13-rollback.md)
 
 This document is worked through **before** the window and ends in a go/no-go decision.
@@ -16,22 +16,37 @@ no-go signal, not something to carry into the window.
 Every command in this document set assumes these are exported. Set them once per terminal.
 
 ```bash
-export NS=gitlab                 # namespace
-export STS=gitlab                # StatefulSet name
-export POD=gitlab-0              # pod name
-export CTR=gitlab                # container name inside the pod
+export NS=gitlab                          # namespace
+export DEPLOY=gitlab-ce                    # Deployment name
+export CTR=gitlab-ce                         # container name
+export SEL="app=gitlab,component=gitlab"                   # label selector that matches the pod
+export PVC=gitlab-pvc                    # PVC name (standalone resource)
+export ARGOAPP=gitlab                     # Argo CD Application name
+
+# Re-resolve the pod name. Deployment pods are renamed on every restart.
+repod() {
+  for i in $(seq 1 60); do
+    POD=$(kubectl get pods -n "$NS" -l "$SEL" \
+      --field-selector=status.phase=Running \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    [ -n "$POD" ] && { export POD; echo "POD=$POD"; return 0; }
+    echo "waiting for pod... ($i)"; sleep 5
+  done
+  echo "TIMEOUT: no Running pod after 5 minutes"; return 1
+}
 
 # Helper used throughout: run a command inside the GitLab container
 gl() { kubectl exec -n "$NS" "$POD" -c "$CTR" -- "$@"; }
 ```
 
-Verify the helper works before relying on it:
+Verify both work before relying on them:
 
 ```bash
+repod
 gl gitlab-ctl status
 ```
 
-> Commands inside the official `gitlab-ee` image already run as root — do **not** prefix
+> Commands inside the official `gitlab-ce` image already run as root — do **not** prefix
 > with `sudo`. GitLab's own documentation assumes a VM install and includes `sudo`; drop it.
 
 ---
@@ -51,10 +66,15 @@ Fill this in first. Every later command and both companion documents reference t
 | PVC name(s) | `kubectl get pvc -n $NS` | `_______` |
 | StorageClass | `kubectl get pvc -n $NS -o jsonpath='{.items[*].spec.storageClassName}'` | `_______` |
 | VolumeSnapshotClass | `kubectl get volumesnapshotclass` | `_______` |
-| Image repository | `kubectl get statefulset $STS -n $NS -o jsonpath='{..image}'` | `_______` |
+| Image repository | `kubectl get deployment $DEPLOY -n $NS -o jsonpath='{..image}'` | `_______` |
 | PVC total / used | `gl df -h /var/opt/gitlab` | `_______` |
 | Postgres data dir size | `gl du -sh /var/opt/gitlab/postgresql/data` | `_______` |
 | External auth type | Admin → Settings → General | `_______` |
+| Pod label selector | `kubectl get deployment $DEPLOY -n $NS -o jsonpath='{.spec.selector.matchLabels}'` | `_______` |
+| Deployment strategy | `kubectl get deployment $DEPLOY -n $NS -o jsonpath='{.spec.strategy.type}'` | `_______` |
+| Argo CD Application | `kubectl get applications -n argocd` | `_______` |
+| **Argo sync policy** | `kubectl get application $ARGOAPP -n argocd -o jsonpath='{.spec.syncPolicy}'` | `_______` |
+| Kustomize overlay path | from the Argo Application `spec.source` | `_______` |
 
 Record the current probe configuration too — you restore it at the end of the window.
 **Save these to your persistent working directory, not `/tmp`** — the window spans several
@@ -62,9 +82,9 @@ hours and possibly a different terminal or machine than the one you are on now.
 
 ```bash
 mkdir -p ~/gitlab-upgrade-2026-08-13
-kubectl get statefulset "$STS" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}'  > ~/gitlab-upgrade-2026-08-13/probe-liveness.json
-kubectl get statefulset "$STS" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}' > ~/gitlab-upgrade-2026-08-13/probe-readiness.json
-kubectl get statefulset "$STS" -n "$NS" -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}{"\n"}'
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}'  > ~/gitlab-upgrade-2026-08-13/probe-liveness.json
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}' > ~/gitlab-upgrade-2026-08-13/probe-readiness.json
+kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}{"\n"}'
 
 cat ~/gitlab-upgrade-2026-08-13/probe-liveness.json; echo
 cat ~/gitlab-upgrade-2026-08-13/probe-readiness.json; echo
@@ -73,15 +93,15 @@ cat ~/gitlab-upgrade-2026-08-13/probe-readiness.json; echo
 Also take a full copy of the workload spec as a reference:
 
 ```bash
-kubectl get statefulset "$STS" -n "$NS" -o yaml > ~/gitlab-upgrade-2026-08-13/statefulset-before.yaml
+kubectl get deployment "$DEPLOY" -n "$NS" -o yaml > ~/gitlab-upgrade-2026-08-13/workload-before.yaml
 ```
 
 Keep these files. They are the source of truth for Phase H of the runbook.
 
-> **If the workload is a `Deployment` rather than a `StatefulSet`**, substitute `deployment`
-> for `statefulset` in every command across all three documents, and note that the pod name
-> **changes on every restart**. In that case, re-resolve `POD` after each scale-up with:
-> `export POD=$(kubectl get pods -n "$NS" -l <your-selector> -o jsonpath='{.items[0].metadata.name}')`
+> **Argo CD manages this workload.** The probe values you capture here are what Git says
+> today. Phase H of the runbook restores them from these files, then verifies that
+> `argocd app diff` is empty before auto-sync is re-enabled. If you change probes in Git
+> between now and the window, re-capture them.
 
 ---
 
@@ -152,13 +172,33 @@ versions** — 18.2 / 18.5 / 18.8 / 18.11 are GitLab's required stops and cannot
 
 ### 4.1 Migrate `git_data_dirs` → `gitaly['configuration']` — **required before 18.0**
 
-The `git_data_dirs` setting is removed in 18.0. Check whether it is set:
+The `git_data_dirs` setting is removed in 18.0.
+
+> **`gitlab.rb` is NOT editable in the pod.** It is supplied by the ConfigMap
+> `gitlab-config-file` (key `gitlab.rb`), mounted read-only at `/opt/gitlab-config/`, and
+> copied into `/etc/gitlab` by the `init-gitlab` init container running `init.sh`.
+> **Any edit you make inside the running pod is discarded on the next restart** — which
+> means it would silently vanish partway through the window.
+>
+> **The change must be made in the ConfigMap in Git, committed, and synced.**
+
+Check both the live file and the ConfigMap — they should agree, and if they do not, that
+is itself a finding worth understanding before you upgrade:
 
 ```bash
+# What GitLab is actually running with
 gl grep -n "git_data_dirs" /etc/gitlab/gitlab.rb
+
+# What Git says (the source of truth)
+kubectl get configmap gitlab-config-file -n "$NS" -o jsonpath='{.data.gitlab\.rb}' \
+  | grep -n "git_data_dirs"
+
+# How init.sh places the file - read it, so you know what the restart will do
+kubectl get configmap gitlab-init-script -n "$NS" -o jsonpath='{.data.init\.sh}'
 ```
 
-If there is no uncommented match, nothing to do. If there is, rewrite it.
+If there is no uncommented match, nothing to do. If there is, rewrite it **in the Git
+source of the ConfigMap**.
 
 **Before:**
 ```ruby
@@ -180,14 +220,31 @@ gitaly['configuration'] = {
 > **The `/repositories` suffix is mandatory.** GitLab appended it internally under the old
 > setting. Omitting it points Gitaly at the wrong directory and every project appears empty.
 
-Apply and verify while still on 17.11.7:
+Apply and verify while still on 17.11.7 — **via Git, then a controlled restart**:
+
+1. Edit `gitlab.rb` in the Kustomize source, commit, push.
+2. Sync Argo (or `kubectl apply` the ConfigMap if Argo is already suspended).
+3. Confirm the ConfigMap in the cluster now shows the new syntax.
+4. Restart the pod so `init.sh` copies the new file into `/etc/gitlab`:
 
 ```bash
-gl gitlab-ctl reconfigure
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=0
+kubectl wait --for=delete pod -l "$SEL" -n "$NS" --timeout=360s
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=1
+repod
+kubectl logs -n "$NS" "$POD" -c "$CTR" -f
+```
+
+5. Verify the change actually landed and Gitaly is healthy:
+
+```bash
+gl grep -n "gitaly\['configuration'\]" /etc/gitlab/gitlab.rb
+gl grep -n "git_data_dirs" /etc/gitlab/gitlab.rb    # expect no uncommented match
 gl gitlab-rake gitlab:gitaly:check
 ```
 
-Then open a project in the UI and confirm the file tree renders.
+Then open a project in the UI and confirm the file tree renders. **Do this before the
+window, not during it** — it costs a full pod restart.
 
 ### 4.2 Enable `ci_only_one_persistent_ref_creation` — **required before 18.0**
 
@@ -268,6 +325,22 @@ Rehearsed on: `__________`  Result: `__________`
 
 ## 6. Verify the snapshot path
 
+> **This gate can cancel the window.** Snapshots are the primary rollback path. If the
+> storage backend has no CSI snapshot support, you have no fast rollback — only the slow
+> backup restore in § C of the rollback card, which on a 300 Gi volume is a very different
+> conversation about window length.
+>
+> Note also that `gitlab-pvc` sets **no `storageClassName`**, so it uses the cluster default.
+> Find out what that actually is before you need it:
+>
+> ```bash
+> kubectl get pvc gitlab-pvc -n "$NS" -o jsonpath='{.spec.storageClassName}{"\n"}'
+> kubectl get storageclass
+> kubectl get volumesnapshotclass
+> ```
+>
+> If `kubectl get volumesnapshotclass` returns nothing, **stop and reconsider the window.**
+
 Take one snapshot now to prove the CSI driver, the VolumeSnapshotClass, and your RBAC
 all work. Finding out they do not at 15:00 is expensive.
 
@@ -323,7 +396,7 @@ critical path. Pull them ahead of time onto the node that will run the pod.
 ```bash
 for v in 18.2.8 18.5.7 18.8.11 18.11.9; do
   echo "=== $v ==="
-  crictl pull gitlab/gitlab-ee:${v}-ee.0 || docker pull gitlab/gitlab-ee:${v}-ee.0
+  crictl pull gitlab/gitlab-ce:${v}-ce.0 || docker pull gitlab/gitlab-ce:${v}-ce.0
 done
 ```
 
@@ -334,10 +407,10 @@ Confirm each tag exists and note its digest:
 
 | Version | Tag | Digest | Pulled |
 |---|---|---|---|
-| 18.2.8 | `gitlab/gitlab-ee:18.2.8-ee.0` | | ☐ |
-| 18.5.7 | `gitlab/gitlab-ee:18.5.7-ee.0` | | ☐ |
-| 18.8.11 | `gitlab/gitlab-ee:18.8.11-ee.0` | | ☐ |
-| 18.11.9 | `gitlab/gitlab-ee:18.11.9-ee.0` | | ☐ |
+| 18.2.8 | `gitlab/gitlab-ce:18.2.8-ce.0` | | ☐ |
+| 18.5.7 | `gitlab/gitlab-ce:18.5.7-ce.0` | | ☐ |
+| 18.8.11 | `gitlab/gitlab-ce:18.8.11-ce.0` | | ☐ |
+| 18.11.9 | `gitlab/gitlab-ce:18.11.9-ce.0` | | ☐ |
 
 ---
 
@@ -387,8 +460,15 @@ Suggested broadcast text:
 All must be ticked by the evening of 12.08.2026.
 
 - [ ] Instance Facts table complete
-- [ ] Probe configuration and `statefulset-before.yaml` saved to `~/gitlab-upgrade-2026-08-13/`
+- [ ] Probe configuration and workload YAML saved to `~/gitlab-upgrade-2026-08-13/`
+- [ ] **Argo CD Application identified and its sync policy recorded**
+- [ ] **Team told not to merge anything touching the GitLab Application today**
+- [ ] Kustomize overlay path known, and you have write access to push the final tag bump
 - [ ] **PostgreSQL ≥ 16.5 confirmed** (or upgraded pre-window and verified)
+- [ ] **A `VolumeSnapshotClass` exists and a test snapshot reached `readyToUse=true`**
+- [ ] Container registry baseline captured: `docker login` + `pull` work **before** the window
+- [ ] `git clone` over SSH on NodePort 30044 works **before** the window
+- [ ] Confirmed the image is `gitlab/gitlab-ce` and all four target tags use `-ce.0`
 - [ ] Four target versions re-confirmed as current
 - [ ] `git_data_dirs` migrated and `gitlab:gitaly:check` passing
 - [ ] `ci_only_one_persistent_ref_creation` enabled

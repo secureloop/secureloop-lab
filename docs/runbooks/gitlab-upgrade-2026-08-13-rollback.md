@@ -15,6 +15,30 @@ Companions: [Pre-flight](gitlab-upgrade-2026-08-13-preflight.md) · [Runbook](gi
 
 ---
 
+## STEP ZERO — IS ARGO CD SUSPENDED?
+
+**Before any recovery command.** If Argo auto-sync is live it will fight every step below —
+recreating the PVC you just deleted, resetting `replicas`, reverting the image.
+
+```bash
+kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.spec.syncPolicy}{"\n"}'
+```
+
+If the output contains `automated`, suspend it **now**:
+
+```bash
+kubectl patch application "$ARGOAPP" -n argocd --type=merge \
+  -p '{"spec":{"syncPolicy":{"automated":null}}}'
+```
+
+- [ ] Output no longer contains `automated` → continue
+
+> **`kubectl rollout undo` is NOT a rollback.** It reverts the pod template and nothing else.
+> The database has already migrated forward. Running an older GitLab against a newer schema
+> gives you a broken instance that *looks* recovered. Do not use it. Use § A, § B or § C.
+
+---
+
 ## DECISION TREE
 
 ```
@@ -44,28 +68,46 @@ Something is wrong.
 
 | If you were leaving | Revert image to | Restore snapshot |
 |---|---|---|
-| 17.11.7 (hop 1 failed) | `gitlab/gitlab-ee:17.11.7-ee.0` | `gitlab-pre-18-2-8` |
-| 18.2.8 (hop 2 failed) | `gitlab/gitlab-ee:18.2.8-ee.0` | `gitlab-pre-18-5-7` |
-| 18.5.7 (hop 3 failed) | `gitlab/gitlab-ee:18.5.7-ee.0` | `gitlab-pre-18-8-11` |
-| 18.8.11 (hop 4 failed) | `gitlab/gitlab-ee:18.8.11-ee.0` | `gitlab-pre-18-11-9` |
+| 17.11.7 (hop 1 failed) | `gitlab/gitlab-ce:17.11.7-ce.0` | `gitlab-pre-18-2-8` |
+| 18.2.8 (hop 2 failed) | `gitlab/gitlab-ce:18.2.8-ce.0` | `gitlab-pre-18-5-7` |
+| 18.5.7 (hop 3 failed) | `gitlab/gitlab-ce:18.5.7-ce.0` | `gitlab-pre-18-8-11` |
+| 18.8.11 (hop 4 failed) | `gitlab/gitlab-ce:18.8.11-ce.0` | `gitlab-pre-18-11-9` |
 
 Off-pod backup: `~/gitlab-upgrade-2026-08-13/window/`
 Secrets: `~/gitlab-upgrade-2026-08-13/window/gitlab-secrets.json`
 
 ```bash
-export NS=gitlab STS=gitlab POD=gitlab-0 CTR=gitlab
+export NS=gitlab DEPLOY=gitlab-ce CTR=gitlab-ce SEL="app=gitlab,component=gitlab" PVC=gitlab-pvc ARGOAPP=gitlab
+
+# Re-resolve the pod name. RUN THIS AFTER EVERY SCALE-UP.
+# Blocks until a Running pod exists. "Running" is not "Ready" -- during migrations the
+# pod is Running and deliberately not Ready, which is exactly when you need to reach it.
+repod() {
+  for i in $(seq 1 60); do
+    POD=$(kubectl get pods -n "$NS" -l "$SEL" \
+      --field-selector=status.phase=Running \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    [ -n "$POD" ] && { export POD; echo "POD=$POD"; return 0; }
+    echo "waiting for pod... ($i)"; sleep 5
+  done
+  echo "TIMEOUT: no Running pod after 5 minutes"; return 1
+}
 gl() { kubectl exec -n "$NS" "$POD" -c "$CTR" -- "$@"; }
 ```
+
+Commands below are written for a **Deployment** and are copy-paste ready. `repod` blocks
+until a Running pod exists — run it after every scale-up, before any `gl` command.
 
 ---
 
 ## § A — Revert image only (migrations have NOT run)
 
 ```bash
-kubectl scale statefulset "$STS" -n "$NS" --replicas=0
-kubectl wait --for=delete pod/"$POD" -n "$NS" --timeout=360s
-kubectl set image statefulset/"$STS" -n "$NS" "$CTR"=gitlab/gitlab-ee:<LAST-GOOD>-ee.0
-kubectl scale statefulset "$STS" -n "$NS" --replicas=1
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=0
+kubectl wait --for=delete pod -l "$SEL" -n "$NS" --timeout=360s
+kubectl set image deployment/"$DEPLOY" -n "$NS" "$CTR"=gitlab/gitlab-ce:<LAST-GOOD>-ce.0
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=1
+repod                 # REQUIRED: new pod, new name
 kubectl logs -n "$NS" "$POD" -c "$CTR" -f
 ```
 
@@ -80,8 +122,8 @@ Restores the PVC to its exact state before the failed hop. Fastest and most comp
 ### B1. Stop everything
 
 ```bash
-kubectl scale statefulset "$STS" -n "$NS" --replicas=0
-kubectl wait --for=delete pod/"$POD" -n "$NS" --timeout=360s
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=0
+kubectl wait --for=delete pod -l "$SEL" -n "$NS" --timeout=360s
 ```
 
 ### B2. Identify the PVC and PROTECT THE VOLUME
@@ -113,6 +155,16 @@ kubectl get volumesnapshot <SNAPSHOT-NAME> -n "$NS" -o jsonpath='{.status.restor
 
 ### B4. Replace the PVC from the snapshot
 
+> **Argo CD manages this PVC.** Confirm STEP ZERO was done. If auto-sync is live, Argo
+> recreates the PVC from Git — empty, with no `dataSource` — the moment you delete it,
+> and you lose the restore. Re-verify before deleting:
+>
+> ```bash
+> kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.spec.syncPolicy}{"\n"}'
+> ```
+>
+> Must not contain `automated`.
+
 ```bash
 # Capture the current spec first, in case you need to recreate it as-is
 kubectl get pvc "$PVC" -n "$NS" -o yaml > ~/pvc-backup-$PVC.yaml
@@ -141,15 +193,23 @@ EOF
 kubectl get pvc "$PVC" -n "$NS" -w      # wait for Bound
 ```
 
-> The PVC name **must match exactly** what the StatefulSet expects. For a
-> `volumeClaimTemplates` StatefulSet the pattern is `<template-name>-<sts-name>-0`,
-> e.g. `data-gitlab-0`.
+> The PVC name **must match exactly** what the Deployment's `volumes[].persistentVolumeClaim.claimName`
+> references — this is `$PVC`, an ordinary standalone manifest in your Kustomize overlay.
+> Confirm with:
+> ```bash
+> kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath='{.spec.template.spec.volumes[*].persistentVolumeClaim.claimName}{"\n"}'
+> ```
+>
+> **After recovery, reconcile Git.** The restored PVC has a `dataSource` that your overlay
+> does not. Either remove the `dataSource` from the live PVC's stored spec expectations, or
+> add `ignoreDifferences` for it in the Argo Application, before re-enabling auto-sync.
 
 ### B5. Revert the image and start
 
 ```bash
-kubectl set image statefulset/"$STS" -n "$NS" "$CTR"=gitlab/gitlab-ee:<LAST-GOOD>-ee.0
-kubectl scale statefulset "$STS" -n "$NS" --replicas=1
+kubectl set image deployment/"$DEPLOY" -n "$NS" "$CTR"=gitlab/gitlab-ce:<LAST-GOOD>-ce.0
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=1
+repod                 # REQUIRED: new pod, new name
 kubectl logs -n "$NS" "$POD" -c "$CTR" -f
 ```
 
@@ -177,11 +237,12 @@ Slower, and the restore **must run on the same GitLab version the backup was tak
 ### C1. Bring up a clean pod on the ORIGINAL version
 
 ```bash
-kubectl scale statefulset "$STS" -n "$NS" --replicas=0
-kubectl wait --for=delete pod/"$POD" -n "$NS" --timeout=360s
-kubectl set image statefulset/"$STS" -n "$NS" "$CTR"=gitlab/gitlab-ee:17.11.7-ee.0
-kubectl scale statefulset "$STS" -n "$NS" --replicas=1
-kubectl rollout status statefulset/"$STS" -n "$NS" --timeout=900s
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=0
+kubectl wait --for=delete pod -l "$SEL" -n "$NS" --timeout=360s
+kubectl set image deployment/"$DEPLOY" -n "$NS" "$CTR"=gitlab/gitlab-ce:17.11.7-ce.0
+kubectl scale deployment "$DEPLOY" -n "$NS" --replicas=1
+repod                 # REQUIRED: new pod, new name
+kubectl rollout status deployment/"$DEPLOY" -n "$NS" --timeout=900s
 ```
 
 ### C2. Restore the SECRETS FIRST
