@@ -8,19 +8,23 @@
 > **Do not start this document until the pre-flight go/no-go is signed off.**
 > In particular: PostgreSQL must already be ≥ 16.5, and the restore must have been rehearsed.
 
-> # ⚠ ARGO CD — RESOLVE THE `selfHeal` CONTRADICTION FIRST
+> # ⚠ ARGO CD `selfHeal: true` — AND TURNING IT OFF BY HAND DOES NOT HOLD
 >
-> The ApplicationSet template sets **`selfHeal: false`**, but the operator reported
-> **`selfHeal: true`**. These cannot both be right, and they imply very different risks.
-> **Phase A0.1 resolves this against the live Application, which is the only authority.**
+> **Git says `selfHeal: true`.** An uncommitted, live-only edit setting it to `false` does
+> **not** make you safe: the ApplicationSet owns this Application, sets no
+> `applicationsSync`, and therefore **regenerates the Application from the Git template on
+> its own schedule — restoring `selfHeal: true`** without warning.
 >
-> | If live is | Risk | Consequence |
-> |---|---|---|
-> | `selfHeal: true` | **Critical** | Argo reverts your image *mid-migration*, and resets `replicas` *during a snapshot* |
-> | `selfHeal: false` | **Moderate** | Imperative drift survives — but **any commit to the argocd-apps repo triggers a sync that wipes it** |
+> The failure mode is the worst kind. You check, see `false`, believe Argo is suspended,
+> start the window — and somewhere around hop 2 the controller reconciles, `selfHeal`
+> returns, and Argo reverts your image mid-migration.
 >
-> Either way Phase A0 runs in full. Under `selfHeal: false` the danger is not Argo watching
-> the cluster, it is a colleague merging a merge request at 16:00.
+> **You must freeze the ApplicationSet FIRST (A0.2 step 1), then suspend the Application.**
+> Doing it in the other order is the same as doing nothing.
+>
+> Once genuinely suspended, the remaining risk is a **commit to `argocd-apps.git`** —
+> `automated` is still on, so a merge under the overlay path triggers a sync that reverts
+> image, replicas and probes. See A0.2b.
 >
 > **Phase A0 is the first step of the window.**
 
@@ -226,19 +230,21 @@ export ARGOAPP=<production application name>
 export NS=<production namespace>
 ```
 
-Now read the **live** policy. The ApplicationSet template says `selfHeal: false`; the
-operator reported `true`. The live object decides:
+**Confirmed state: Git has `selfHeal: true`.** A live-only edit to `false` has been made
+but not committed.
 
 ```bash
 kubectl get application "$ARGOAPP" -n argocd -o jsonpath='{.spec.syncPolicy}{"\n"}'
 ```
 
-Record what it actually says: `_______________________`
+Whatever this prints right now, **treat the effective value as `true`**, because the
+ApplicationSet will restore it from the template. A live reading of `false` here is not
+reassurance — it is a snapshot of a value that reverts itself.
 
-| Live value | What it means for today |
-|---|---|
-| `"selfHeal":true` | Someone diverged from the template. Argo reverts cluster drift within seconds. **Critical.** |
-| `"selfHeal":false` | Matches the template. Cluster drift survives — but a **Git commit to the overlay path triggers a full sync** that reverts everything. |
+> **Do not "fix" this by committing `selfHeal: false` to Git today.** A commit to
+> `argocd-apps.git` under the overlay path triggers an automated sync — the exact event
+> A0.2b exists to prevent. Changing the durable default is a decision for a calm day, not
+> ninety minutes before a maintenance window.
 
 **`"prune":false` is confirmed in the template, and that is good news:** Argo will not
 delete resources that are absent from Git, so your `VolumeSnapshot` objects are safe from
@@ -257,10 +263,13 @@ The ApplicationSet sets `preserveResourcesOnDeletion: true` but does **not** set
 any edit you make to the Application**, including your suspension — silently, and on its
 own schedule.
 
-> This is the trap that makes people believe they suspended Argo when they did not. You
-> patch the Application, it looks right, the controller regenerates it minutes later, and
-> you find out when your image is reverted mid-hop. **A0.2 handles this in the correct
-> order.**
+> **This is not hypothetical for this window.** The `selfHeal: false` currently set by hand
+> on the live Application is exactly such an edit. It is living on borrowed time and will
+> be reset to the template's `true` at the controller's next reconcile.
+>
+> You patch the Application, it reads back correctly, you proceed — and the controller
+> regenerates it partway through hop 2. **A0.2 handles this by freezing the controller
+> first.**
 
 ### A0.2 Suspend — **ApplicationSet first, then Application**
 
@@ -343,11 +352,21 @@ the cluster, so coordinate first:
 Suspending and *verifying* suspension are different things. Create harmless drift and
 confirm Argo leaves it alone.
 
-> **Know what this test does and does not prove.** It proves nothing is reverting *cluster
-> drift* — that is, it rules out `selfHeal`. It says **nothing** about the Git-commit risk
-> in A0.2b, which no cluster-side test can detect. If the live app was already
-> `selfHeal: false`, this test passes whether or not you suspended anything, so treat a
-> pass as "selfHeal is not the threat" rather than "Argo is fully handled".
+> **This test is only meaningful after A0.2 step 1.** Run before the ApplicationSet is
+> frozen, it passes on the strength of the hand-set `selfHeal: false` — which the
+> controller has not yet gotten around to reverting. That is a false negative with a
+> delayed fuse: green now, `selfHeal: true` restored at hop 2.
+>
+> It also says **nothing** about the Git-commit risk in A0.2b, which no cluster-side test
+> can detect. A pass means "selfHeal is not currently reverting drift", not "Argo is
+> handled".
+
+Re-confirm the freeze is still in place before you trust the result:
+
+```bash
+kubectl get applicationset "$APPSET" -n argocd -o jsonpath='{.spec.syncPolicy.applicationsSync}{"\n"}'
+# must read: create-only
+```
 
 ```bash
 # Introduce trivial, reversible drift
@@ -1009,12 +1028,14 @@ kubectl get applicationset "$APPSET" -n argocd -o jsonpath='{.spec.syncPolicy}{"
 # kubectl scale deployment argocd-applicationset-controller -n argocd --replicas=1
 ```
 
-> **Watch what happens next.** With `applicationsSync` restored, the controller regenerates
-> the Application from the template — including its `syncPolicy`. If the template says
-> `selfHeal: false` and the live app said `true`, **the controller will now reset it to
-> `false`**, permanently changing behaviour you may have been relying on. Decide
-> deliberately whether that is what you want, and if not, fix the template in Git rather
-> than re-patching the live object.
+> **Expect `selfHeal: true` to come back — that is correct.** With `applicationsSync`
+> restored, the controller regenerates the Application from the Git template, which says
+> `selfHeal: true`. Your hand-set `false` disappears, and the instance returns to its
+> normal, documented behaviour. That is the intended end state, not a regression.
+>
+> This is also why H3.4's empty-diff gate matters so much here: once `selfHeal` is back,
+> **any remaining drift is reverted automatically and immediately.** Git must already
+> describe 18.11.9 before you reach this step.
 
 - [ ] Merge freeze on `argocd-apps.git` lifted and announced
 
