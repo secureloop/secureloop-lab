@@ -637,13 +637,23 @@ gl gitlab-rails runner -e production '
 # Background migrations at zero
 gl gitlab-psql -c "SELECT job_class_name, table_name, status FROM batched_background_migrations WHERE status NOT IN (3, 6);"
 
-# Free space MUST exceed 2x the Postgres data directory
+# Free space in the volume MUST exceed 2x the Postgres data directory
 gl du -sh /var/opt/gitlab/postgresql/data
 gl df -h /var/opt/gitlab
+
+# Ceph pool headroom — this hop rewrites the whole database, which inflates
+# every snapshot taken earlier today via copy-on-write
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph df
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph status
 ```
 
 - [ ] Background migrations zero
-- [ ] **Free space ≥ 2× Postgres data dir** — if not, **stop here and stay on 18.8.11**
+- [ ] **Free space in the volume ≥ 2× Postgres data dir** — if not, **stop here and stay on 18.8.11**
+- [ ] **Ceph pool has headroom for a full DB rewrite** and status is `HEALTH_OK`
+
+> If the Ceph pool is tight, delete nothing to make room — deleting a snapshot here is
+> irreversible under `deletionPolicy: Delete` and costs you the rollback for hops you have
+> already completed. Stop on 18.8.11 instead and do hop 4 in its own window.
 
 ### Execute
 
@@ -884,13 +894,19 @@ Let the pod come up, then find the difference — do not start patching under ti
 Keep every snapshot until the instance has run a full business day on 18.11.9. Background
 migrations may still be finishing and problems often surface under real load.
 
+> **`deletionPolicy` is `Delete`.** Removing a `VolumeSnapshot` object destroys the Ceph
+> snapshot behind it immediately and irreversibly. There is no undo. Treat every
+> `kubectl delete volumesnapshot` as a one-way door.
+
 ```bash
 # Run on 14.08.2026 or later, NOT during the window
 kubectl get volumesnapshot -n "$NS"
 # kubectl delete volumesnapshot gitlab-pre-18-2-8 gitlab-pre-18-5-7 gitlab-pre-18-8-11 -n "$NS"
 ```
 
-Retain `gitlab-pre-18-11-9` and the off-pod backup for at least a week.
+Retain `gitlab-pre-18-11-9` and the off-pod backup for at least a week. Snapshots do
+consume pool space that grows as the volume diverges — check `ceph df` when you clean up,
+but let correctness win over capacity while the upgrade is still fresh.
 
 ---
 

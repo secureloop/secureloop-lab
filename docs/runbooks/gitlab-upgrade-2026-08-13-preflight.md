@@ -325,21 +325,78 @@ Rehearsed on: `__________`  Result: `__________`
 
 ## 6. Verify the snapshot path
 
-> **This gate can cancel the window.** Snapshots are the primary rollback path. If the
-> storage backend has no CSI snapshot support, you have no fast rollback — only the slow
-> backup restore in § C of the rollback card, which on a 300 Gi volume is a very different
-> conversation about window length.
->
-> Note also that `gitlab-pvc` sets **no `storageClassName`**, so it uses the cluster default.
-> Find out what that actually is before you need it:
->
-> ```bash
-> kubectl get pvc gitlab-pvc -n "$NS" -o jsonpath='{.spec.storageClassName}{"\n"}'
-> kubectl get storageclass
-> kubectl get volumesnapshotclass
-> ```
->
-> If `kubectl get volumesnapshotclass` returns nothing, **stop and reconsider the window.**
+**Confirmed:** the cluster uses **Rook Ceph RBD** (`rbd.csi.ceph.com`) with a
+VolumeSnapshotClass whose **`deletionPolicy` is `Delete`**. Snapshots are available, which
+means the primary rollback path exists. Three consequences follow.
+
+### 6.1 Get the exact class and StorageClass names
+
+`gitlab-pvc` sets **no `storageClassName`**, so it uses the cluster default. Both names go
+into the snapshot and restore YAML, so resolve them now:
+
+```bash
+kubectl get volumesnapshotclass                                     # exact NAME, not the driver
+kubectl get pvc gitlab-pvc -n "$NS" -o jsonpath='{.spec.storageClassName}{"\n"}'
+kubectl get storageclass
+```
+
+Record them:
+
+| Value | Command output |
+|---|---|
+| VolumeSnapshotClass **name** | `_______` |
+| StorageClass of `gitlab-pvc` | `_______` |
+
+> The restored PVC **must use the same StorageClass** as the source. A snapshot from one
+> Ceph pool cannot be restored into a PVC backed by a different one.
+
+### 6.2 `deletionPolicy: Delete` — deleting the CR destroys the snapshot
+
+With `Delete`, removing a `VolumeSnapshot` object deletes the underlying
+`VolumeSnapshotContent` **and the Ceph snapshot itself**. There is no recycle bin and no
+undo.
+
+- **Never delete a snapshot during the window**, not even to "clean up" a failed hop.
+- The cleanup step in Phase H5 is deliberately scheduled for **the following day**.
+- If anyone else has access to the namespace, tell them not to touch `volumesnapshot`
+  objects today.
+
+Argo prunes only resources it tracks, and snapshots you create by hand carry no Argo
+tracking label — so they should be safe from a sync. Verify rather than assume, once,
+after your test snapshot exists:
+
+```bash
+kubectl get volumesnapshot -n "$NS" -o jsonpath='{.items[*].metadata.labels}{"\n"}'
+argocd app diff "$ARGOAPP" | grep -i volumesnapshot || echo "OK: Argo does not track snapshots"
+```
+
+### 6.3 Ceph pool capacity — the non-obvious one
+
+RBD snapshots are copy-on-write. They cost almost nothing at creation and then grow as the
+live volume diverges from them. **Hop 4 rewrites the entire PostgreSQL data directory**
+during the automatic 17.7 upgrade, which makes every snapshot taken earlier in the window
+suddenly hold a large set of changed blocks.
+
+So the pool must have headroom for four snapshots *plus* a full database rewrite:
+
+```bash
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph df
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd pool ls detail
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph status
+```
+
+| Check | Requirement | Actual |
+|---|---|---|
+| Pool free space | ≥ 2× the Postgres data dir, on top of current usage | `_______` |
+| `ceph status` | `HEALTH_OK` | `_______` |
+
+A pool that fills mid-window blocks writes on the live volume — GitLab stops dead, and so
+does the upgrade. If headroom is marginal, **take fewer snapshots**: keep the one before
+hop 1 and the one before hop 4, and accept coarser rollback granularity for hops 2 and 3.
+
+> **The snapshots share the Ceph cluster's fate.** If the pool or cluster is the problem,
+> both the volume and every snapshot of it are affected at once. This is exactly why the
+> off-pod backup in section 5 is not optional.
 
 Take one snapshot now to prove the CSI driver, the VolumeSnapshotClass, and your RBAC
 all work. Finding out they do not at 15:00 is expensive.
@@ -465,7 +522,10 @@ All must be ticked by the evening of 12.08.2026.
 - [ ] **Team told not to merge anything touching the GitLab Application today**
 - [ ] Kustomize overlay path known, and you have write access to push the final tag bump
 - [ ] **PostgreSQL ≥ 16.5 confirmed** (or upgraded pre-window and verified)
-- [ ] **A `VolumeSnapshotClass` exists and a test snapshot reached `readyToUse=true`**
+- [ ] **Test snapshot reached `readyToUse=true`**, duration noted
+- [ ] VolumeSnapshotClass **name** and PVC StorageClass recorded (§6.1)
+- [ ] **Ceph pool has ≥ 2× Postgres data dir free** and `ceph status` is `HEALTH_OK` (§6.3)
+- [ ] Everyone with namespace access told **not to delete VolumeSnapshots today**
 - [ ] Container registry baseline captured: `docker login` + `pull` work **before** the window
 - [ ] `git clone` over SSH on NodePort 30044 works **before** the window
 - [ ] Confirmed the image is `gitlab/gitlab-ce` and all four target tags use `-ce.0`

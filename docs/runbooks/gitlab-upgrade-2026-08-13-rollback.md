@@ -142,6 +142,11 @@ kubectl get pv "$PV" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}{"\n"}'  
 
 ### B3. Confirm the snapshot is usable
 
+> **Rook Ceph RBD, `deletionPolicy: Delete`.** Do not delete any VolumeSnapshot while
+> recovering — it destroys the Ceph snapshot instantly and takes the rollback for the
+> other hops with it. Restoring does **not** consume the snapshot; you can restore the
+> same snapshot more than once.
+
 ```bash
 kubectl get volumesnapshot -n "$NS"
 kubectl get volumesnapshot <SNAPSHOT-NAME> -n "$NS" -o jsonpath='{.status.readyToUse}{"\n"}'   # must read: true
